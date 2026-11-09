@@ -6,7 +6,10 @@ namespace BrowserKeyMacro.Services;
 
 public sealed class ForegroundMatchResult
 {
+    /// <summary>Aynı process ön planda (gönderim canContinue için gevşek).</summary>
     public bool IsMatch { get; init; }
+    /// <summary>Seçilen HWND birebir ön planda (yanlış Edge penceresi = false).</summary>
+    public bool IsHwndMatch { get; init; }
     public bool WindowClosed { get; init; }
     public IntPtr ForegroundHandle { get; init; }
     public string? ForegroundProcessName { get; init; }
@@ -70,23 +73,34 @@ public sealed class ForegroundBrowserService
             };
         }
 
+        var hwndMatch = selected.Handle != IntPtr.Zero
+            && foreground.Handle == selected.Handle
+            && IsWindow(selected.Handle);
+
         var processMatch = !string.IsNullOrWhiteSpace(foreground.ProcessName)
             && foreground.ProcessName.Equals(selected.ProcessName, StringComparison.OrdinalIgnoreCase);
 
+        // canContinue: process yeterli; öne alma kararı HWND ile (MainForm IsHwndMatch)
+        var isMatch = processMatch;
+
         MacroDebugLog.Write(
             $"Evaluate selectedProc={selected.ProcessName} selectedHWND=0x{selected.Handle.ToInt64():X} " +
-            $"fgProc={foreground.ProcessName} fgHWND=0x{foreground.Handle.ToInt64():X} match={processMatch}");
+            $"fgProc={foreground.ProcessName} fgHWND=0x{foreground.Handle.ToInt64():X} " +
+            $"hwndMatch={hwndMatch} processMatch={processMatch} match={isMatch}");
 
         return new ForegroundMatchResult
         {
-            IsMatch = processMatch,
+            IsMatch = isMatch,
+            IsHwndMatch = hwndMatch,
             WindowClosed = false,
             ForegroundHandle = foreground.Handle,
             ForegroundProcessName = foreground.ProcessName,
             ForegroundTitle = foreground.Title,
-            Message = processMatch
-                ? $"Seçilen işlem ön planda: {selected.ProcessName}"
-                : $"Seçilen işlem ön planda değil (aktif: {foreground.ProcessName ?? "?"}, beklenen: {selected.ProcessName})"
+            Message = hwndMatch
+                ? $"Seçilen pencere ön planda: {selected.ProcessName}"
+                : processMatch
+                    ? $"Aynı işlem başka pencerede (aktif HWND=0x{foreground.Handle.ToInt64():X})"
+                    : $"Seçilen işlem ön planda değil (aktif: {foreground.ProcessName ?? "?"}, beklenen: {selected.ProcessName})"
         };
     }
 
@@ -128,6 +142,7 @@ public sealed class ForegroundBrowserService
 
     /// <summary>
     /// AutoHotkey WinActivate benzeri: hedef pencereyi zorla öne getirir.
+    /// Hedef zaten ön plandaysa Alt/ForceForeground no-op (oyunda Alt enjeksiyonu yok).
     /// </summary>
     public bool TryBringToFront(BrowserWindowInfo selected)
     {
@@ -137,6 +152,16 @@ public sealed class ForegroundBrowserService
 
         try
         {
+            var already = GetForegroundSnapshot();
+            // Yalnız seçilen HWND öndeyse no-op — aynı process başka Edge yetmez
+            if (already is not null && already.Handle == target.Handle)
+            {
+                MacroDebugLog.Write(
+                    $"BringToFront no-op (hwnd FG) proc={target.ProcessName} " +
+                    $"hwnd=0x{target.Handle.ToInt64():X}");
+                return true;
+            }
+
             AllowSetForegroundWindow(ASFW_ANY);
             ForceForegroundWindow(target.Handle);
 
@@ -144,8 +169,7 @@ public sealed class ForegroundBrowserService
             {
                 Thread.Sleep(40 + attempt * 20);
                 var snap = GetForegroundSnapshot();
-                if (snap is not null
-                    && snap.ProcessName.Equals(target.ProcessName, StringComparison.OrdinalIgnoreCase))
+                if (snap is not null && snap.Handle == target.Handle)
                 {
                     MacroDebugLog.Write(
                         $"BringToFront OK attempt={attempt} proc={target.ProcessName} hwnd=0x{target.Handle.ToInt64():X}");
@@ -180,23 +204,31 @@ public sealed class ForegroundBrowserService
         if (hWnd == IntPtr.Zero || !IsWindow(hWnd))
             return;
 
+        // Zaten FG → Alt enjeksiyonu / AttachThreadInput yok
+        var foreground = GetForegroundWindow();
+        if (foreground == hWnd)
+        {
+            MacroDebugLog.Write($"ForceForeground no-op (hwnd already FG) 0x{hWnd.ToInt64():X}");
+            return;
+        }
+
+        // Alt / SwitchToThisWindow(fAltTab) yok — başka tarayıcıyı öne atıyordu
         if (IsIconic(hWnd))
             ShowWindow(hWnd, SW_RESTORE);
         else
             ShowWindow(hWnd, SW_SHOW);
 
-        ShowWindow(hWnd, SW_SHOWNA);
         BringWindowToTop(hWnd);
-        SwitchToThisWindow(hWnd, true);
+        AllowSetForegroundWindow(ASFW_ANY);
+        SetForegroundWindow(hWnd);
 
-        var foreground = GetForegroundWindow();
+        foreground = GetForegroundWindow();
+        if (foreground == hWnd)
+            return;
+
         var targetThread = GetWindowThreadProcessId(hWnd, out _);
         var foregroundThread = GetWindowThreadProcessId(foreground, out _);
         var currentThread = GetCurrentThreadId();
-
-        // AHK tarzı: kısa Alt tuşu ile SetForegroundWindow kilidini gevşet
-        keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
-        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
 
         var attachedFg = false;
         var attachedTarget = false;

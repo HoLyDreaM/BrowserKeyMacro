@@ -16,6 +16,14 @@ public sealed class KeyboardInputService
 {
     private const int KeyDownUpGapMs = 20;
 
+    /// <summary>
+    /// SendInput <c>dwExtraInfo</c> işareti — kendi enjeksiyonumuzu Raw Input'ta yok saymak için.
+    /// Caps Lock harf VK eşlemesini bozmaz; yol <c>ToUnicode</c>/char değil sabit VK ('A'..'Z', '0'..'9').
+    /// </summary>
+    public const uint InjectedExtraInfoValue = 0x00424B4D; // 'BKM\0'
+
+    public static readonly UIntPtr InjectedExtraInfo = (UIntPtr)InjectedExtraInfoValue;
+
     public IReadOnlyList<string> NormalizeSequence(IEnumerable<string?> keys)
     {
         var list = new List<string>();
@@ -107,7 +115,42 @@ public sealed class KeyboardInputService
     }
 
     /// <summary>
-    /// AutoHotkey SendInput benzeri: VK + ScanCode, KEYDOWN / KEYUP.
+    /// Tetik tuşu hâlâ fiziksel basılıysa KEYUP enjekte et — oyun F basılıyken Z/1/3 yutabiliyor.
+    /// Yalnız GetAsyncKeyState 0x8000 true iken; dwExtraInfo ile Raw echo armed desync önlenir.
+    /// </summary>
+    public void ForceKeyUp(string keyName)
+    {
+        var normalized = NormalizeKeyName(keyName);
+        if (normalized is null || !TryMapVirtualKey(normalized, out var vk))
+            return;
+        ForceKeyUpVk(vk, normalized);
+    }
+
+    /// <summary>F klavye: tetik F fizikselde VK_Q olabilir — kayıtlı VK kullan.</summary>
+    public void ForceKeyUpVk(ushort vk, string? label = null)
+    {
+        if (vk == 0)
+            return;
+
+        if ((GetAsyncKeyState(vk) & 0x8000) == 0)
+            return;
+
+        var mapped = MapVirtualKey(vk, MAPVK_VK_TO_VSC_EX);
+        var scanCode = (ushort)(mapped & 0xFF);
+        if (scanCode == 0)
+            scanCode = (ushort)MapVirtualKey(vk, MAPVK_VK_TO_VSC);
+
+        var extended = IsExtendedKey(vk) || (mapped & 0xFF000000) != 0;
+        var extFlag = (extended ? KEYEVENTF_EXTENDEDKEY : 0u) | KEYEVENTF_SCANCODE;
+        _ = SendOne(0, scanCode, extFlag, keyUp: true, out _);
+        _ = SendOne(vk, scanCode, extended ? KEYEVENTF_EXTENDEDKEY : 0u, keyUp: true, out _);
+        MacroDebugLog.Write($"ForceKeyUp {label ?? "vk"} vk=0x{vk:X2} extra=0x{InjectedExtraInfoValue:X}");
+        Thread.Sleep(30);
+    }
+
+    /// <summary>
+    /// AutoHotkey SendInput benzeri: VK + scan KEYDOWN / KEYUP (Test ve hotkey aynı yol).
+    /// Caps Lock açık/kapalı fark etmez — harf/rakam sabit VK; ToUnicode kullanılmaz.
     /// </summary>
     public KeySendResult SendKeyAhkStyle(string keyName)
     {
@@ -129,18 +172,18 @@ public sealed class KeyboardInputService
 
         var extended = IsExtendedKey(vk) || (mapped & 0xFF000000) != 0;
         var extFlag = extended ? KEYEVENTF_EXTENDEDKEY : 0u;
+        var path = "vk+scan";
 
-        // 1) Klasik AHK yolu: wVk + wScan
+        // 1.18'de çalışan yol: VK + scan (oyun bunu alıyordu)
         var downSent = SendOne(vk, scanCode, extFlag, keyUp: false, out var downError);
         Thread.Sleep(KeyDownUpGapMs);
         var upSent = SendOne(vk, scanCode, extFlag, keyUp: true, out var upError);
 
-        // 2) Yedek: saf scan-code (bazı oyun / tarayıcı motorları)
         if (downSent != 1 || upSent != 1)
         {
+            path = "scancode";
             MacroDebugLog.Write(
-                $"SendInput VK yolu zayıf key={normalized} down={downSent} up={upSent} — scan-code deneniyor");
-
+                $"SendInput VK yolu zayıf key={normalized} down={downSent} up={upSent} — scancode");
             var scanFlags = KEYEVENTF_SCANCODE | extFlag;
             downSent = SendOne(0, scanCode, scanFlags, keyUp: false, out downError);
             Thread.Sleep(KeyDownUpGapMs);
@@ -155,7 +198,7 @@ public sealed class KeyboardInputService
             : $"{normalized} HATA | SendInput DOWN={downSent} UP={upSent} Win32={lastError}";
 
         MacroDebugLog.Write(
-            $"SendInput key={normalized} vk=0x{vk:X2} scan=0x{scanCode:X2} ext={extended} " +
+            $"SendInput key={normalized} vk=0x{vk:X2} scan=0x{scanCode:X2} ext={extended} path={path} " +
             $"down={downSent} up={upSent} win32={lastError}");
 
         return new KeySendResult
@@ -186,7 +229,7 @@ public sealed class KeyboardInputService
                     wScan = scan,
                     dwFlags = f,
                     time = 0,
-                    dwExtraInfo = UIntPtr.Zero
+                    dwExtraInfo = InjectedExtraInfo
                 }
             }
         };
@@ -203,159 +246,19 @@ public sealed class KeyboardInputService
             or 0x21 or 0x22 // PgUp PgDn
             or 0x5B or 0x5C; // Win
 
-    public static string? NormalizeKeyName(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw))
-            return null;
+    /// <summary>INI / Tag sabit id (F, D1, NumPad1). Layout yok.</summary>
+    public static string? NormalizeKeyName(string? raw) =>
+        KeyBindingMapper.NormalizeStorageId(raw);
 
-        var key = raw.Trim();
-        if (key.Equals("Space", StringComparison.OrdinalIgnoreCase)
-            || key.Equals(" ", StringComparison.Ordinal))
-            return "Space";
-
-        if (key.Equals("Enter", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("Return", StringComparison.OrdinalIgnoreCase))
-            return "Enter";
-
-        if (key.Equals("Tab", StringComparison.OrdinalIgnoreCase))
-            return "Tab";
-
-        if (key.Equals("Escape", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("Esc", StringComparison.OrdinalIgnoreCase))
-            return "Escape";
-
-        if (key.Equals("Left", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("ArrowLeft", StringComparison.OrdinalIgnoreCase))
-            return "Left";
-
-        if (key.Equals("Right", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("ArrowRight", StringComparison.OrdinalIgnoreCase))
-            return "Right";
-
-        if (key.Equals("Up", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("ArrowUp", StringComparison.OrdinalIgnoreCase))
-            return "Up";
-
-        if (key.Equals("Down", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("ArrowDown", StringComparison.OrdinalIgnoreCase))
-            return "Down";
-
-        if (key.Length >= 2 && key.StartsWith("F", StringComparison.OrdinalIgnoreCase)
-            && int.TryParse(key[1..], out var fn) && fn is >= 1 and <= 12)
-            return $"F{fn}";
-
-        if (key.Equals("X1", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("Mouse4", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("XButton1", StringComparison.OrdinalIgnoreCase))
-            return "X1";
-
-        if (key.Equals("X2", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("Mouse5", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("XButton2", StringComparison.OrdinalIgnoreCase))
-            return "X2";
-
-        if (key.Equals("MButton", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("Middle", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("Mouse3", StringComparison.OrdinalIgnoreCase))
-            return "MButton";
-
-        if (key.Length == 1)
-        {
-            var ch = char.ToUpperInvariant(key[0]);
-            if (ch is >= 'A' and <= 'Z' or >= '0' and <= '9')
-                return ch.ToString();
-        }
-
-        return null;
-    }
-
-    public static string? FromKeys(Keys keys)
-    {
-        if (keys is >= Keys.F1 and <= Keys.F12)
-            return $"F{(keys - Keys.F1) + 1}";
-
-        if (keys is >= Keys.D0 and <= Keys.D9)
-            return ((char)('0' + (keys - Keys.D0))).ToString();
-
-        if (keys is >= Keys.NumPad0 and <= Keys.NumPad9)
-            return ((char)('0' + (keys - Keys.NumPad0))).ToString();
-
-        if (keys is >= Keys.A and <= Keys.Z)
-            return keys.ToString().ToUpperInvariant();
-
-        return keys switch
-        {
-            Keys.Enter or Keys.Return => "Enter",
-            Keys.Tab => "Tab",
-            Keys.Space => "Space",
-            Keys.Escape => "Escape",
-            Keys.Left => "Left",
-            Keys.Right => "Right",
-            Keys.Up => "Up",
-            Keys.Down => "Down",
-            Keys.XButton1 => "X1",
-            Keys.XButton2 => "X2",
-            Keys.MButton => "MButton",
-            _ => null
-        };
-    }
+    public static string? FromKeys(Keys keys) =>
+        KeyBindingMapper.TryFromKeyCode(keys, out var id, out _, out _) ? id : null;
 
     public static string? FromMouseButtons(MouseButtons buttons) =>
-        buttons switch
-        {
-            MouseButtons.XButton1 => "X1",
-            MouseButtons.XButton2 => "X2",
-            MouseButtons.Middle => "MButton",
-            _ => null
-        };
+        KeyBindingMapper.FromMouseButtons(buttons);
 
-    public static bool TryMapVirtualKey(string keyName, out ushort vk)
-    {
-        vk = 0;
-        var normalized = NormalizeKeyName(keyName);
-        if (normalized is null)
-            return false;
-
-        if (normalized.Length == 1)
-        {
-            var ch = normalized[0];
-            if (ch is >= 'A' and <= 'Z')
-            {
-                vk = (ushort)ch;
-                return true;
-            }
-
-            if (ch is >= '0' and <= '9')
-            {
-                vk = (ushort)ch;
-                return true;
-            }
-        }
-
-        if (normalized.StartsWith('F') && int.TryParse(normalized[1..], out var fn) && fn is >= 1 and <= 12)
-        {
-            vk = (ushort)(0x70 + (fn - 1));
-            return true;
-        }
-
-        vk = normalized switch
-        {
-            "Enter" => 0x0D,
-            "Tab" => 0x09,
-            "Space" => 0x20,
-            "Escape" => 0x1B,
-            "Left" => 0x25,
-            "Up" => 0x26,
-            "Right" => 0x27,
-            "Down" => 0x28,
-            "X1" => 0x05,      // VK_XBUTTON1 — oyunda klavyeden daha güvenilir
-            "X2" => 0x06,      // VK_XBUTTON2
-            "MButton" => 0x04, // VK_MBUTTON
-            _ => (ushort)0
-        };
-
-        return vk != 0;
-    }
+    /// <summary>Sabit VK (Keys enum). Char/ToUnicode/scan yok.</summary>
+    public static bool TryMapVirtualKey(string keyName, out ushort vk) =>
+        KeyBindingMapper.TryGetVirtualKey(keyName, out vk);
 
     private const int INPUT_KEYBOARD = 1;
     private const uint KEYEVENTF_KEYUP = 0x0002;
@@ -414,6 +317,9 @@ public sealed class KeyboardInputService
 
     [DllImport("user32.dll")]
     private static extern uint MapVirtualKey(uint uCode, uint uMapType);
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
 
     [DllImport("kernel32.dll")]
     private static extern void SetLastError(uint dwErrCode);

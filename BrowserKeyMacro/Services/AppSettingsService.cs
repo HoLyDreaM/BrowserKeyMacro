@@ -63,6 +63,9 @@ public sealed class AppSettingsService
                         case "BringBrowserToFront":
                             settings.BringBrowserToFront = ParseBool(value);
                             break;
+                        case "ContinuousLoop":
+                            settings.ContinuousLoop = ParseBool(value);
+                            break;
                     }
                 }
                 else if (string.Equals(section, "Keys", StringComparison.OrdinalIgnoreCase))
@@ -110,14 +113,15 @@ public sealed class AppSettingsService
         sb.AppendLine($"SelectedBrowserTitle={settings.SelectedBrowserTitle}");
         sb.AppendLine($"DelayMs={delay.ToString(CultureInfo.InvariantCulture)}");
         sb.AppendLine($"BringBrowserToFront={(settings.BringBrowserToFront ? "true" : "false")}");
+        sb.AppendLine($"ContinuousLoop={(settings.ContinuousLoop ? "true" : "false")}");
         sb.AppendLine();
         sb.AppendLine("[Keys]");
-        sb.AppendLine($"Trigger={settings.Trigger}");
-        sb.AppendLine($"IntermediateKey={settings.IntermediateKey}");
-        sb.AppendLine($"Key1={settings.Key1}");
-        sb.AppendLine($"Key2={settings.Key2}");
-        sb.AppendLine($"Key3={settings.Key3}");
-        sb.AppendLine($"Key4={settings.Key4}");
+        sb.AppendLine($"Trigger={KeyBindingMapper.NormalizeStorageId(settings.Trigger) ?? settings.Trigger}");
+        sb.AppendLine($"IntermediateKey={KeyBindingMapper.NormalizeStorageId(settings.IntermediateKey) ?? settings.IntermediateKey}");
+        sb.AppendLine($"Key1={KeyBindingMapper.NormalizeStorageId(settings.Key1) ?? settings.Key1}");
+        sb.AppendLine($"Key2={KeyBindingMapper.NormalizeStorageId(settings.Key2) ?? settings.Key2}");
+        sb.AppendLine($"Key3={KeyBindingMapper.NormalizeStorageId(settings.Key3) ?? settings.Key3}");
+        sb.AppendLine($"Key4={KeyBindingMapper.NormalizeStorageId(settings.Key4) ?? settings.Key4}");
 
         try
         {

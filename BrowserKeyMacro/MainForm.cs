@@ -1,4 +1,5 @@
 using System.Text;
+using BrowserKeyMacro.Controls;
 using BrowserKeyMacro.Models;
 using BrowserKeyMacro.Services;
 
@@ -19,14 +20,182 @@ public partial class MainForm : Form
     private int _sendingGate; // 0 = idle, 1 = sending (Interlocked)
     private string _activeTrigger = "Q";
     private int _pendingTrigger; // 1 = gönderim bitince bir kez daha çalıştır
+    private long _lastKeyStatusTick;
+    private int _captureSuspendDepth;
+    private bool _diagnosticCapture;
+    private bool _loadingTrigger;
+    private readonly List<string> _sendLines = new();
 
     public MainForm()
     {
         _foregroundService = new ForegroundBrowserService(_browserWindowService);
         InitializeComponent();
+        var version = typeof(MainForm).Assembly.GetName().Version;
+        var exePath = Environment.ProcessPath ?? Application.ExecutablePath;
+        Text = $"Browser Key Macro v{version?.Major}.{version?.Minor} | EXE: {exePath}";
+        MacroDebugLog.Write($"APP START | Version={version} | EXE={exePath}");
         ApplyBrandingIcons();
         cmbBrowser.SelectedIndexChanged += CmbBrowser_SelectedIndexChanged;
-        _hotkeyService.SetUiNotify(this, OnGlobalTriggerFromBackground);
+        WireKeyCaptureBoxes();
+        FillTriggerList();
+        _hotkeyService.SetUiNotify(this, OnGlobalTriggerFromBackground, OnKeySeen);
+    }
+
+    private sealed record TriggerItem(string Id, string Display)
+    {
+        public override string ToString() => Display;
+    }
+
+    private void FillTriggerList()
+    {
+        cmbTrigger.BeginUpdate();
+        cmbTrigger.Items.Clear();
+        foreach (var id in KeyBindingMapper.TriggerChoices)
+            cmbTrigger.Items.Add(new TriggerItem(id, KeyBindingMapper.ToDisplayName(id)));
+        cmbTrigger.EndUpdate();
+        cmbTrigger.SelectedIndexChanged += CmbTrigger_SelectedIndexChanged;
+    }
+
+    private string SelectedTriggerId =>
+        (cmbTrigger.SelectedItem as TriggerItem)?.Id ?? KeyBindingMapper.TriggerChoices[0];
+
+    private void SelectTrigger(string? stored)
+    {
+        var id = KeyBindingMapper.NormalizeStorageId(stored);
+        var index = id is null ? -1 : KeyBindingMapper.TriggerChoices.ToList().IndexOf(id);
+        if (index < 0)
+        {
+            MacroDebugLog.Write($"Trigger '{stored}' listede yok (harf/rakam tetik kaldırıldı) → {KeyBindingMapper.TriggerChoices[0]}");
+            index = 0;
+        }
+
+        _loadingTrigger = true;
+        try
+        {
+            cmbTrigger.SelectedIndex = index;
+        }
+        finally
+        {
+            _loadingTrigger = false;
+        }
+
+        _settings.Trigger = SelectedTriggerId;
+    }
+
+    private void CmbTrigger_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        if (_loadingTrigger)
+            return;
+
+        _settings.Trigger = SelectedTriggerId;
+        MacroDebugLog.Write($"SET KEY | Field=Trigger | Key={_settings.Trigger} | Source=cmbTrigger (liste)");
+        try
+        {
+            _settingsService.Save(_settings);
+        }
+        catch (Exception ex)
+        {
+            MacroDebugLog.Write($"INI kayıt hatası: {ex.Message}");
+        }
+
+        SetStatus($"Tetikleyici = {KeyBindingMapper.ToDisplayName(_settings.Trigger)}");
+    }
+
+    private void WireKeyCaptureBoxes()
+    {
+        foreach (var box in KeyCaptureBoxes())
+        {
+            box.CaptureStarted += KeyCaptureBox_CaptureStarted;
+            box.CaptureEnded += KeyCaptureBox_CaptureEnded;
+            box.CaptureMessage += (_, msg) => SetStatus(msg);
+            box.KeyAssigned += KeyCaptureBox_KeyAssigned;
+        }
+
+        txtIntermediate.FieldName = "IntermediateKey";
+        txtKey1.FieldName = "Key1";
+        txtKey2.FieldName = "Key2";
+        txtKey3.FieldName = "Key3";
+        txtKey4.FieldName = "Key4";
+    }
+
+    /// <summary>Model ve INI yalnız buradan güncellenir (kaynak: KeyCaptureTextBox.SetCapturedKey).</summary>
+    private void KeyCaptureBox_KeyAssigned(object? sender, KeyAssignedEventArgs e)
+    {
+        if (sender is not KeyCaptureTextBox box)
+            return;
+
+        var value = e.StorageId ?? string.Empty;
+        switch (box.FieldName)
+        {
+            case "IntermediateKey": _settings.IntermediateKey = value; break;
+            case "Key1": _settings.Key1 = value; break;
+            case "Key2": _settings.Key2 = value; break;
+            case "Key3": _settings.Key3 = value; break;
+            case "Key4": _settings.Key4 = value; break;
+        }
+
+        if (e.Source == "INI.Load")
+            return;
+
+        try
+        {
+            _settingsService.Save(_settings);
+        }
+        catch (Exception ex)
+        {
+            MacroDebugLog.Write($"INI kayıt hatası: {ex.Message}");
+        }
+
+        var display = e.Key == Keys.None ? "(boş)" : KeyBindingMapper.ToDisplayName(value);
+        if (_diagnosticCapture && box == txtKey1)
+        {
+            _diagnosticCapture = false;
+            SetStatus($"Tanı: KeyCode={e.Key} | KeyValue={e.KeyValue}{Environment.NewLine}" +
+                      $"Atanan: {display} — macro-debug.log içinde SET KEY satırına bak");
+        }
+        else
+        {
+            SetStatus($"{box.FieldName} = {display}  (KeyCode={e.Key} | KeyValue={e.KeyValue})");
+        }
+    }
+
+    private void BtnDiagnostic_Click(object? sender, EventArgs e)
+    {
+        if (_isRunning)
+        {
+            SetStatus("Tanı testi için önce makroyu durdur.");
+            return;
+        }
+
+        _diagnosticCapture = true;
+        MacroDebugLog.Write("DIAG | Tuş Yakalama Tanı Testi başladı (Key1 kutusu)");
+        txtKey1.StartCapture();
+        SetStatus("Tanı testi: şimdi tek bir tuşa bas (ör. F). Beklenen: KeyCode=F | KeyValue=70");
+    }
+
+    private IEnumerable<KeyCaptureTextBox> KeyCaptureBoxes()
+    {
+        yield return txtIntermediate;
+        yield return txtKey1;
+        yield return txtKey2;
+        yield return txtKey3;
+        yield return txtKey4;
+    }
+
+    private void KeyCaptureBox_CaptureStarted(object? sender, EventArgs e)
+    {
+        if (Interlocked.Increment(ref _captureSuspendDepth) == 1)
+            _hotkeyService.BeginCaptureSuspend();
+    }
+
+    private void KeyCaptureBox_CaptureEnded(object? sender, EventArgs e)
+    {
+        if (Interlocked.Decrement(ref _captureSuspendDepth) > 0)
+            return;
+
+        Interlocked.Exchange(ref _captureSuspendDepth, 0);
+        // Makro çalışıyorsa tetik yeniden bağlanır; atama alanı TextBox'a yazmaz
+        _hotkeyService.EndCaptureSuspend(restoreIfHadKey: _isRunning);
     }
 
     private void ApplyBrandingIcons()
@@ -70,14 +239,21 @@ public partial class MainForm : Form
 
     private void ApplySettingsToUi(AppSettings settings)
     {
-        txtTrigger.Text = KeyboardInputService.NormalizeKeyName(settings.Trigger) ?? "Q";
-        txtIntermediate.Text = KeyboardInputService.NormalizeKeyName(settings.IntermediateKey) ?? string.Empty;
-        txtKey1.Text = KeyboardInputService.NormalizeKeyName(settings.Key1) ?? string.Empty;
-        txtKey2.Text = KeyboardInputService.NormalizeKeyName(settings.Key2) ?? string.Empty;
-        txtKey3.Text = KeyboardInputService.NormalizeKeyName(settings.Key3) ?? string.Empty;
-        txtKey4.Text = KeyboardInputService.NormalizeKeyName(settings.Key4) ?? string.Empty;
+        SelectTrigger(settings.Trigger);
+        LoadKey(txtIntermediate, settings.IntermediateKey, Keys.None);
+        LoadKey(txtKey1, settings.Key1, Keys.None);
+        LoadKey(txtKey2, settings.Key2, Keys.None);
+        LoadKey(txtKey3, settings.Key3, Keys.None);
+        LoadKey(txtKey4, settings.Key4, Keys.None);
         nudDelay.Value = Math.Clamp(settings.DelayMs, 10, 5000);
         chkBringFront.Checked = settings.BringBrowserToFront;
+        chkContinuous.Checked = settings.ContinuousLoop;
+    }
+
+    private static void LoadKey(KeyCaptureTextBox box, string? stored, Keys fallback)
+    {
+        var key = KeyBindingMapper.TryParseKeys(stored, out var parsed) ? parsed : fallback;
+        box.SetCapturedKey(key, "INI.Load");
     }
 
     private AppSettings CaptureSettingsFromUi()
@@ -93,12 +269,13 @@ public partial class MainForm : Form
                 ?? _settings.SelectedBrowserTitle,
             DelayMs = (int)nudDelay.Value,
             BringBrowserToFront = chkBringFront.Checked,
-            Trigger = string.IsNullOrWhiteSpace(txtTrigger.Text) ? "Q" : txtTrigger.Text.Trim(),
-            IntermediateKey = txtIntermediate.Text.Trim(),
-            Key1 = txtKey1.Text.Trim(),
-            Key2 = txtKey2.Text.Trim(),
-            Key3 = txtKey3.Text.Trim(),
-            Key4 = txtKey4.Text.Trim()
+            ContinuousLoop = chkContinuous.Checked,
+            Trigger = string.IsNullOrEmpty(_settings.Trigger) ? "Q" : _settings.Trigger,
+            IntermediateKey = _settings.IntermediateKey,
+            Key1 = _settings.Key1,
+            Key2 = _settings.Key2,
+            Key3 = _settings.Key3,
+            Key4 = _settings.Key4
         };
     }
 
@@ -201,46 +378,6 @@ public partial class MainForm : Form
         }
     }
 
-    private void KeyCapture_Enter(object? sender, EventArgs e)
-    {
-        if (sender is TextBox tb)
-            tb.SelectAll();
-    }
-
-    private void KeyCapture_KeyDown(object? sender, KeyEventArgs e)
-    {
-        if (sender is not TextBox tb)
-            return;
-
-        e.SuppressKeyPress = true;
-        e.Handled = true;
-
-        if (e.KeyCode is Keys.Back or Keys.Delete)
-        {
-            if (!ReferenceEquals(tb, txtTrigger))
-                tb.Text = string.Empty;
-            return;
-        }
-
-        var mapped = KeyboardInputService.FromKeys(e.KeyCode);
-        if (mapped is null)
-            return;
-
-        tb.Text = mapped;
-    }
-
-    private void TriggerCapture_MouseDown(object? sender, MouseEventArgs e)
-    {
-        if (sender is not TextBox)
-            return;
-
-        var mapped = KeyboardInputService.FromMouseButtons(e.Button);
-        if (mapped is null)
-            return;
-
-        txtTrigger.Text = mapped;
-    }
-
     private void BtnStart_Click(object? sender, EventArgs e)
     {
         if (_isRunning)
@@ -256,12 +393,14 @@ public partial class MainForm : Form
                 return;
             }
 
-            var trigger = KeyboardInputService.NormalizeKeyName(txtTrigger.Text) ?? "Q";
-            txtTrigger.Text = trigger;
+            var trigger = SelectedTriggerId;
 
             var mainKeys = _keyboardService.NormalizeSequence(new[]
             {
-                txtKey1.Text, txtKey2.Text, txtKey3.Text, txtKey4.Text
+                txtKey1.StorageId,
+                txtKey2.StorageId,
+                txtKey3.StorageId,
+                txtKey4.StorageId
             });
 
             if (mainKeys.Count == 0)
@@ -271,15 +410,9 @@ public partial class MainForm : Form
                 return;
             }
 
-            var intermediate = KeyboardInputService.NormalizeKeyName(txtIntermediate.Text);
-            txtIntermediate.Text = intermediate ?? string.Empty;
-
-            // AHK gibi: hedef her zaman öne alınacak
-            chkBringFront.Checked = true;
-
             SaveSettingsSafe();
             LogSelectedBrowser("Makro başlatıldı");
-            _hotkeyService.SetUiNotify(this, OnGlobalTriggerFromBackground);
+            _hotkeyService.SetUiNotify(this, OnGlobalTriggerFromBackground, OnKeySeen);
             _hotkeyService.SetNotifyWindow(Handle);
 
             if (!_hotkeyService.TryRegister(trigger, out var win32Error))
@@ -294,9 +427,20 @@ public partial class MainForm : Form
             UpdateRunningUi(true);
             _statusTimer.Start();
             Interlocked.Exchange(ref _pendingTrigger, 0);
-            SetStatus($"Tetikleyici aktif: {trigger} — oyundayken yalnızca '{trigger}' bas (v1.18)");
-            UpdateTrayText($"Tetikleyici aktif: {trigger}");
-            MacroDebugLog.Write($"Hazır: oyundayken '{trigger}' bas. Durum kartında yanlış tuş spam'i yok.");
+            var triggerDisplay = KeyBindingMapper.ToDisplayName(trigger);
+            if (chkContinuous.Checked)
+            {
+                SetStatus($"Sürekli döngü aktif — Durdur ile bitir (tetik: {triggerDisplay})");
+                UpdateTrayText("Sürekli döngü aktif");
+                MacroDebugLog.Write($"Sürekli döngü başladı. trigger={trigger}");
+                ExecuteTriggerSameAsButton("continuous-start");
+            }
+            else
+            {
+                SetStatus($"Tetikleyici aktif: {triggerDisplay} — basılan tuş burada");
+                UpdateTrayText($"Tetikleyici aktif: {triggerDisplay}");
+                MacroDebugLog.Write($"Hazır: tetik beklemede. '{trigger}' bas.");
+            }
         }
         catch (Exception ex)
         {
@@ -342,7 +486,19 @@ public partial class MainForm : Form
         UpdateTrayText(status);
     }
 
-    /// <summary>Raw Input / poll-fallback → UI thread BeginInvoke. Oyundayken burası çalışmalı.</summary>
+    private void OnKeySeen(string name, bool isTrigger)
+    {
+        if (!_isRunning || _isSending)
+            return;
+
+        _lastKeyStatusTick = Environment.TickCount64;
+        var triggerLabel = KeyBindingMapper.ToDisplayName(_activeTrigger);
+        SetStatus(isTrigger
+            ? $"Basılan: {name}  ✓ tetik"
+            : $"Basılan: {name}  (tetik: {triggerLabel})");
+    }
+
+    /// <summary>Raw Input / poll → UI thread. Oyundayken burası çalışmalı.</summary>
     private void OnGlobalTriggerFromBackground()
     {
         MacroDebugLog.Write("Trigger received (BeginInvoke)");
@@ -369,8 +525,9 @@ public partial class MainForm : Form
             ? _activeTrigger
             : _hotkeyService.CurrentKeyName;
 
-        SetStatus($"Global tetikleyici alındı: {key}");
-        UpdateTrayText($"Global tetikleyici alındı: {key}");
+        _lastKeyStatusTick = Environment.TickCount64;
+        SetStatus($"Tetik algılandı: {key} — gönderiliyor…");
+        UpdateTrayText($"Tetik: {key}");
         try { System.Media.SystemSounds.Beep.Play(); } catch { /* ignore */ }
         ExecuteTriggerSameAsButton("hotkey");
     }
@@ -404,8 +561,14 @@ public partial class MainForm : Form
         }
 
         var sequence = _keyboardService.BuildSequenceWithIntermediate(
-            new[] { txtKey1.Text, txtKey2.Text, txtKey3.Text, txtKey4.Text },
-            txtIntermediate.Text);
+            new[]
+            {
+                txtKey1.StorageId,
+                txtKey2.StorageId,
+                txtKey3.StorageId,
+                txtKey4.StorageId
+            },
+            txtIntermediate.StorageId);
 
         if (sequence.Count == 0)
         {
@@ -416,12 +579,16 @@ public partial class MainForm : Form
 
         var selected = _selectedBrowser;
         var delay = (int)nudDelay.Value;
+        var continuous = chkContinuous.Checked && !isTest;
         _isSending = true;
         _hotkeyService.SuppressInput(true);
-        MacroDebugLog.Write($"Macro execution started seq=[{string.Join(',', sequence)}] delay={delay}ms");
+        MacroDebugLog.Write(
+            $"Macro execution started seq=[{string.Join(',', sequence)}] delay={delay}ms continuous={continuous}");
         SetStatus(isTest
             ? $"Test gönderiliyor: {string.Join(" → ", sequence)}"
-            : $"Gönderiliyor: {string.Join(" → ", sequence)}");
+            : continuous
+                ? $"Döngü gönderiliyor: {string.Join(" → ", sequence)}"
+                : $"Gönderiliyor: {string.Join(" → ", sequence)}");
 
         _ = Task.Run(() =>
         {
@@ -431,29 +598,59 @@ public partial class MainForm : Form
             }
             finally
             {
-                _hotkeyService.SuppressInput(false);
                 _isSending = false;
                 Interlocked.Exchange(ref _sendingGate, 0);
+                _hotkeyService.SuppressInput(false);
                 MacroDebugLog.Write("Macro execution completed");
+            }
 
-                // Kuyruktaki tetikleyiciyi bir kez çalıştır
-                if (Interlocked.Exchange(ref _pendingTrigger, 0) == 1 && _isRunning)
+            if (continuous && _isRunning)
+            {
+                MacroDebugLog.Write($"Continuous loop: {delay}ms sonra sonraki tur");
+                var waited = 0;
+                while (waited < delay && _isRunning)
                 {
-                    MacroDebugLog.Write("Pending trigger flush");
-                    try
+                    Thread.Sleep(Math.Min(50, delay - waited));
+                    waited += 50;
+                }
+
+                if (!_isRunning)
+                    return;
+
+                try
+                {
+                    BeginInvoke(new Action(() =>
                     {
-                        BeginInvoke(new Action(() =>
-                        {
-                            if (!_isRunning || _isSending)
-                                return;
-                            SetStatus($"Global tetikleyici alındı: {_activeTrigger} (kuyruk)");
-                            ExecuteTriggerSameAsButton("hotkey-queued");
-                        }));
-                    }
-                    catch
+                        if (!_isRunning || _isSending)
+                            return;
+                        RunSequenceOnce(isTest: false, requireRunning: true);
+                    }));
+                }
+                catch
+                {
+                    // ignore
+                }
+
+                return;
+            }
+
+            // Kuyruktaki tetikleyiciyi bir kez çalıştır (sürekli döngü kapalıyken)
+            if (Interlocked.Exchange(ref _pendingTrigger, 0) == 1 && _isRunning)
+            {
+                MacroDebugLog.Write("Pending trigger flush");
+                try
+                {
+                    BeginInvoke(new Action(() =>
                     {
-                        // ignore
-                    }
+                        if (!_isRunning || _isSending)
+                            return;
+                        SetStatus($"Global tetikleyici alındı: {_activeTrigger} (kuyruk)");
+                        ExecuteTriggerSameAsButton("hotkey-queued");
+                    }));
+                }
+                catch
+                {
+                    // ignore
                 }
             }
         });
@@ -486,21 +683,19 @@ public partial class MainForm : Form
                 $"GetForegroundWindow HWND=0x{fgBefore?.Handle.ToInt64():X} " +
                 $"Process={fgBefore?.ProcessName} Title=\"{fgBefore?.Title}\"");
 
-            // Oyundayken zaten ön plandaysa BringToFront atla — hemen gönder
+            // Seçilen HWND önde değilse öne al (aynı Edge başka pencere = yine öne al)
             var evalBefore = _foregroundService.Evaluate(refreshed);
-            if (!evalBefore.IsMatch)
+            if (!evalBefore.IsHwndMatch)
             {
                 UiSetStatus($"Hedef öne alınıyor: {refreshed.ProcessName}…");
                 if (!_foregroundService.TryBringToFront(refreshed))
                 {
                     var afterBring = _foregroundService.Evaluate(refreshed);
-                    if (!afterBring.IsMatch)
+                    if (!afterBring.IsHwndMatch && !afterBring.IsMatch)
                     {
                         var fgFail = _foregroundService.GetForegroundSnapshot();
                         _hotkeyService.LogDiagnostic("Tetikleme başarısız (öne alma)", fgFail);
-                        UiSetStatus(afterBring.WindowClosed
-                            ? afterBring.Message
-                            : $"Seçilen hedef ön planda değil ({afterBring.ForegroundProcessName ?? refreshed.ProcessName}). Tuş gönderilmedi.");
+                        UiSetStatus(afterBring.Message);
                         return;
                     }
                 }
@@ -509,7 +704,8 @@ public partial class MainForm : Form
             }
             else
             {
-                MacroDebugLog.Write("Hedef zaten ön planda — BringToFront atlandı");
+                MacroDebugLog.Write(
+                    $"Hedef HWND ön planda — BringToFront atlandı hwnd=0x{refreshed.Handle.ToInt64():X}");
             }
 
             var eval = _foregroundService.Evaluate(refreshed);
@@ -521,22 +717,42 @@ public partial class MainForm : Form
                         ? "Tetikleme başarısız (hedef kapalı)"
                         : "Tetikleme başarısız (hedef ön planda değil)",
                     fgFail);
-                UiSetStatus(eval.WindowClosed
-                    ? eval.Message
-                    : $"Seçilen hedef ön planda değil ({eval.ForegroundProcessName ?? "?"}). Tuş gönderilmedi.");
+                UiSetStatus(eval.Message);
                 return;
             }
 
-            var statusParts = new List<string>();
-            var abortedFocus = false;
-            var abortMessage = "Seçilen işlem ön planda değil, tuş gönderilmedi";
+            // Tetik hâlâ basılıysa bırak — oyun F basılıyken diğer tuşları yutmasın
+            var triggerName = string.IsNullOrEmpty(_activeTrigger) ? "F" : _activeTrigger;
+            if (_hotkeyService.CurrentVk != 0)
+                _keyboardService.ForceKeyUpVk(_hotkeyService.CurrentVk, triggerName);
+            else
+                _keyboardService.ForceKeyUp(triggerName);
 
+            UiResetSendLines();
+            var abortedFocus = false;
+            var abortMessage = "Seçilen pencere ön planda değil, tuş gönderilmedi";
+
+            // H5: canContinue process-only (Evaluate zaten process); transient miss → 1 kısa retry.
+            // Abort yalnız process değişimi / pencere kapalı — BringToFront sırasında false yapılmaz.
             var results = _keyboardService.SendSequenceDetailed(
                 sequence,
                 delay,
                 canContinue: () =>
                 {
                     var check = _foregroundService.Evaluate(refreshed);
+                    if (check.IsMatch)
+                        return true;
+
+                    if (check.WindowClosed)
+                    {
+                        abortedFocus = true;
+                        abortMessage = check.Message;
+                        return false;
+                    }
+
+                    // Transient miss: kısa retry (HWND titremesi / kısa focus kaybı)
+                    Thread.Sleep(40);
+                    check = _foregroundService.Evaluate(refreshed);
                     if (check.IsMatch)
                         return true;
 
@@ -548,12 +764,10 @@ public partial class MainForm : Form
                 },
                 onKeySent: result =>
                 {
-                    statusParts.Add(result.Success
-                        ? $"{result.KeyName} gönderildi (SendInput: {result.DownSent + result.UpSent})"
-                        : $"{result.KeyName} HATA Win32={result.LastWin32Error}");
-
-                    var preview = string.Join(" → ", statusParts.TakeLast(4));
-                    UiSetStatus(preview);
+                    var name = KeyBindingMapper.ToDisplayName(result.KeyName);
+                    UiAppendSendLine(result.Success
+                        ? $"Gönderildi: {name}"
+                        : $"HATA: {name} (Win32={result.LastWin32Error})");
                 });
 
             if (abortedFocus)
@@ -570,10 +784,7 @@ public partial class MainForm : Form
                 return;
             }
 
-            var sent = string.Join(" → ", results.Select(r => r.KeyName));
-            UiSetStatus(isTest
-                ? "Test tamamlandı: " + sent
-                : "Makro tamamlandı: " + sent);
+            UiAppendSendLine(isTest ? "Test tamamlandı" : "Makro tamamlandı");
         }
         catch (Exception ex)
         {
@@ -597,9 +808,46 @@ public partial class MainForm : Form
         UpdateTrayText(text);
     }
 
+    private void UiResetSendLines()
+    {
+        if (IsDisposed)
+            return;
+
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(UiResetSendLines));
+            return;
+        }
+
+        _sendLines.Clear();
+    }
+
+    private void UiAppendSendLine(string line)
+    {
+        if (IsDisposed)
+            return;
+
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(() => UiAppendSendLine(line)));
+            return;
+        }
+
+        _sendLines.Add(line);
+        while (_sendLines.Count > 6)
+            _sendLines.RemoveAt(0);
+
+        _lastKeyStatusTick = Environment.TickCount64;
+        SetStatus(string.Join(Environment.NewLine, _sendLines));
+        UpdateTrayText(line);
+    }
+
     private void StatusTimer_Tick(object? sender, EventArgs e)
     {
         if (!_isRunning || _isSending)
+            return;
+
+        if (Environment.TickCount64 - _lastKeyStatusTick < 4000)
             return;
 
         var selected = _selectedBrowser;
@@ -614,9 +862,10 @@ public partial class MainForm : Form
         }
         else if (!eval.IsMatch
                  && (lblStatus.Text is "Makro aktif" or "Makro tamamlandı" or "Seçilen tarayıcı aktif."
-                     || lblStatus.Text.StartsWith("Makro tamamlandı", StringComparison.Ordinal)))
+                     || lblStatus.Text.StartsWith("Makro tamamlandı", StringComparison.Ordinal)
+                     || lblStatus.Text.StartsWith("Tetikleyici aktif", StringComparison.Ordinal)))
         {
-            SetStatus("Seçilen tarayıcı aktif değil.");
+            SetStatus("Seçilen tarayıcı aktif değil — oyuna tıkla.");
             UpdateTrayText("Tarayıcı aktif değil");
         }
         else if (eval.IsMatch && lblStatus.Text.Contains("aktif değil", StringComparison.OrdinalIgnoreCase))
@@ -632,7 +881,7 @@ public partial class MainForm : Form
         btnStop.Enabled = running;
         cmbBrowser.Enabled = !running;
         btnRefresh.Enabled = !running;
-        txtTrigger.Enabled = !running;
+        cmbTrigger.Enabled = !running;
         txtIntermediate.Enabled = !running;
         txtKey1.Enabled = !running;
         txtKey2.Enabled = !running;
@@ -640,6 +889,7 @@ public partial class MainForm : Form
         txtKey4.Enabled = !running;
         nudDelay.Enabled = !running;
         chkBringFront.Enabled = !running;
+        chkContinuous.Enabled = !running;
         // Test her zaman kullanılabilir; eşzamanlı gönderim _sendingGate ile engellenir
         btnTest.Enabled = true;
     }
@@ -683,14 +933,7 @@ public partial class MainForm : Form
     {
         base.OnHandleCreated(e);
         _hotkeyService.SetNotifyWindow(Handle);
-        _hotkeyService.SetUiNotify(this, OnGlobalTriggerFromBackground);
-    }
-
-    protected override void WndProc(ref Message m)
-    {
-        // Raw Input WM_INPUT → GlobalHotkeyService (hwndTarget = bu form)
-        _ = _hotkeyService.ProcessMessage(ref m);
-        base.WndProc(ref m);
+        _hotkeyService.SetUiNotify(this, OnGlobalTriggerFromBackground, OnKeySeen);
     }
 
     protected override void OnShown(EventArgs e)

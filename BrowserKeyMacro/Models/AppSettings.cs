@@ -4,9 +4,10 @@ public sealed class AppSettings
 {
     public string SelectedBrowserProcess { get; set; } = string.Empty;
     public string SelectedBrowserTitle { get; set; } = string.Empty;
-    public int DelayMs { get; set; } = 300;
+    public int DelayMs { get; set; } = 500;
     public bool BringBrowserToFront { get; set; } = true;
-    public string Trigger { get; set; } = "Q";
+    public bool ContinuousLoop { get; set; }
+    public string Trigger { get; set; } = "F1";
     public string IntermediateKey { get; set; } = string.Empty;
     public string Key1 { get; set; } = "1";
     public string Key2 { get; set; } = "2";

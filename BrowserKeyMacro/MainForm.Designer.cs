@@ -28,20 +28,22 @@ partial class MainForm
         cmbBrowser = new ComboBox();
         btnRefresh = new Button();
         lblTrigger = new Label();
-        txtTrigger = new TextBox();
+        cmbTrigger = new ComboBox();
         lblIntermediate = new Label();
-        txtIntermediate = new TextBox();
+        txtIntermediate = new Controls.KeyCaptureTextBox();
         lblSequence = new Label();
-        txtKey1 = new TextBox();
-        txtKey2 = new TextBox();
-        txtKey3 = new TextBox();
-        txtKey4 = new TextBox();
+        txtKey1 = new Controls.KeyCaptureTextBox();
+        txtKey2 = new Controls.KeyCaptureTextBox();
+        txtKey3 = new Controls.KeyCaptureTextBox();
+        txtKey4 = new Controls.KeyCaptureTextBox();
         lblDelay = new Label();
         nudDelay = new NumericUpDown();
         chkBringFront = new CheckBox();
+        chkContinuous = new CheckBox();
         btnStart = new Button();
         btnStop = new Button();
         btnTest = new Button();
+        btnDiagnostic = new Button();
         pnlStatus = new Panel();
         lblStatusTitle = new Label();
         lblStatus = new Label();
@@ -115,21 +117,18 @@ partial class MainForm
         lblTrigger.Size = new Size(75, 15);
         lblTrigger.Text = "Tetikleyici tuş";
         //
-        // txtTrigger
+        // cmbTrigger
         //
-        txtTrigger.BackColor = Color.FromArgb(45, 48, 58);
-        txtTrigger.BorderStyle = BorderStyle.FixedSingle;
-        txtTrigger.ForeColor = Color.FromArgb(235, 235, 240);
-        txtTrigger.Location = new Point(26, 150);
-        txtTrigger.Name = "txtTrigger";
-        txtTrigger.PlaceholderText = "Tuş veya X1/X2";
-        txtTrigger.ReadOnly = true;
-        txtTrigger.Size = new Size(120, 23);
-        txtTrigger.TabIndex = 2;
-        txtTrigger.TextAlign = HorizontalAlignment.Center;
-        txtTrigger.KeyDown += KeyCapture_KeyDown;
-        txtTrigger.MouseDown += TriggerCapture_MouseDown;
-        txtTrigger.Enter += KeyCapture_Enter;
+        cmbTrigger.BackColor = Color.FromArgb(45, 48, 58);
+        cmbTrigger.DropDownStyle = ComboBoxStyle.DropDownList;
+        cmbTrigger.FlatStyle = FlatStyle.Flat;
+        cmbTrigger.ForeColor = Color.FromArgb(235, 235, 240);
+        cmbTrigger.FormattingEnabled = true;
+        cmbTrigger.Location = new Point(26, 150);
+        cmbTrigger.MaxDropDownItems = 16;
+        cmbTrigger.Name = "cmbTrigger";
+        cmbTrigger.Size = new Size(120, 23);
+        cmbTrigger.TabIndex = 2;
         //
         // lblIntermediate
         //
@@ -152,8 +151,7 @@ partial class MainForm
         txtIntermediate.Size = new Size(120, 23);
         txtIntermediate.TabIndex = 3;
         txtIntermediate.TextAlign = HorizontalAlignment.Center;
-        txtIntermediate.KeyDown += KeyCapture_KeyDown;
-        txtIntermediate.Enter += KeyCapture_Enter;
+        txtIntermediate.AllowClear = true;
         //
         // lblSequence
         //
@@ -176,8 +174,7 @@ partial class MainForm
         txtKey1.Size = new Size(120, 23);
         txtKey1.TabIndex = 4;
         txtKey1.TextAlign = HorizontalAlignment.Center;
-        txtKey1.KeyDown += KeyCapture_KeyDown;
-        txtKey1.Enter += KeyCapture_Enter;
+        txtKey1.AllowClear = true;
         //
         // txtKey2
         //
@@ -191,8 +188,7 @@ partial class MainForm
         txtKey2.Size = new Size(120, 23);
         txtKey2.TabIndex = 5;
         txtKey2.TextAlign = HorizontalAlignment.Center;
-        txtKey2.KeyDown += KeyCapture_KeyDown;
-        txtKey2.Enter += KeyCapture_Enter;
+        txtKey2.AllowClear = true;
         //
         // txtKey3
         //
@@ -206,8 +202,7 @@ partial class MainForm
         txtKey3.Size = new Size(120, 23);
         txtKey3.TabIndex = 6;
         txtKey3.TextAlign = HorizontalAlignment.Center;
-        txtKey3.KeyDown += KeyCapture_KeyDown;
-        txtKey3.Enter += KeyCapture_Enter;
+        txtKey3.AllowClear = true;
         //
         // txtKey4
         //
@@ -221,8 +216,7 @@ partial class MainForm
         txtKey4.Size = new Size(120, 23);
         txtKey4.TabIndex = 7;
         txtKey4.TextAlign = HorizontalAlignment.Center;
-        txtKey4.KeyDown += KeyCapture_KeyDown;
-        txtKey4.Enter += KeyCapture_Enter;
+        txtKey4.AllowClear = true;
         //
         // lblDelay
         //
@@ -244,7 +238,7 @@ partial class MainForm
         nudDelay.Name = "nudDelay";
         nudDelay.Size = new Size(120, 23);
         nudDelay.TabIndex = 8;
-        nudDelay.Value = new decimal(new int[] { 300, 0, 0, 0 });
+        nudDelay.Value = new decimal(new int[] { 500, 0, 0, 0 });
         //
         // chkBringFront
         //
@@ -259,6 +253,17 @@ partial class MainForm
         chkBringFront.Text = "Tarayıcıyı öne getir (zorunlu)";
         chkBringFront.UseVisualStyleBackColor = true;
         //
+        // chkContinuous
+        //
+        chkContinuous.AutoSize = true;
+        chkContinuous.ForeColor = Color.FromArgb(220, 222, 230);
+        chkContinuous.Location = new Point(26, 304);
+        chkContinuous.Name = "chkContinuous";
+        chkContinuous.Size = new Size(360, 19);
+        chkContinuous.TabIndex = 10;
+        chkContinuous.Text = "Sürekli döngü (Durdur'a kadar tekrarlar)";
+        chkContinuous.UseVisualStyleBackColor = true;
+        //
         // btnStart
         //
         btnStart.BackColor = Color.FromArgb(46, 160, 90);
@@ -266,10 +271,10 @@ partial class MainForm
         btnStart.FlatStyle = FlatStyle.Flat;
         btnStart.Font = new Font("Segoe UI Semibold", 12F, FontStyle.Bold);
         btnStart.ForeColor = Color.White;
-        btnStart.Location = new Point(26, 320);
+        btnStart.Location = new Point(26, 340);
         btnStart.Name = "btnStart";
         btnStart.Size = new Size(250, 52);
-        btnStart.TabIndex = 10;
+        btnStart.TabIndex = 11;
         btnStart.Text = "▶  Başlat";
         btnStart.UseVisualStyleBackColor = false;
         btnStart.Click += BtnStart_Click;
@@ -282,10 +287,10 @@ partial class MainForm
         btnStop.FlatStyle = FlatStyle.Flat;
         btnStop.Font = new Font("Segoe UI Semibold", 12F, FontStyle.Bold);
         btnStop.ForeColor = Color.White;
-        btnStop.Location = new Point(298, 320);
+        btnStop.Location = new Point(298, 340);
         btnStop.Name = "btnStop";
         btnStop.Size = new Size(250, 52);
-        btnStop.TabIndex = 11;
+        btnStop.TabIndex = 12;
         btnStop.Text = "■  Durdur";
         btnStop.UseVisualStyleBackColor = false;
         btnStop.Click += BtnStop_Click;
@@ -297,24 +302,38 @@ partial class MainForm
         btnTest.FlatStyle = FlatStyle.Flat;
         btnTest.Font = new Font("Segoe UI Semibold", 10F, FontStyle.Bold);
         btnTest.ForeColor = Color.White;
-        btnTest.Location = new Point(26, 384);
+        btnTest.Location = new Point(26, 404);
         btnTest.Name = "btnTest";
         btnTest.Size = new Size(522, 36);
-        btnTest.TabIndex = 12;
+        btnTest.TabIndex = 13;
         btnTest.Text = "TETİKLE / Test Et  (gönder)";
         btnTest.UseVisualStyleBackColor = false;
         btnTest.Click += BtnTest_Click;
+        //
+        // btnDiagnostic
+        //
+        btnDiagnostic.BackColor = Color.FromArgb(60, 64, 78);
+        btnDiagnostic.FlatAppearance.BorderSize = 0;
+        btnDiagnostic.FlatStyle = FlatStyle.Flat;
+        btnDiagnostic.ForeColor = Color.FromArgb(235, 235, 240);
+        btnDiagnostic.Location = new Point(26, 448);
+        btnDiagnostic.Name = "btnDiagnostic";
+        btnDiagnostic.Size = new Size(522, 30);
+        btnDiagnostic.TabIndex = 14;
+        btnDiagnostic.Text = "Tuş Yakalama Tanı Testi";
+        btnDiagnostic.UseVisualStyleBackColor = false;
+        btnDiagnostic.Click += BtnDiagnostic_Click;
         //
         // pnlStatus
         //
         pnlStatus.BackColor = Color.FromArgb(40, 43, 54);
         pnlStatus.Controls.Add(lblStatusTitle);
         pnlStatus.Controls.Add(lblStatus);
-        pnlStatus.Location = new Point(26, 434);
+        pnlStatus.Location = new Point(26, 488);
         pnlStatus.Name = "pnlStatus";
         pnlStatus.Padding = new Padding(14);
-        pnlStatus.Size = new Size(522, 96);
-        pnlStatus.TabIndex = 13;
+        pnlStatus.Size = new Size(522, 166);
+        pnlStatus.TabIndex = 15;
         //
         // lblStatusTitle
         //
@@ -331,9 +350,9 @@ partial class MainForm
         lblStatus.Font = new Font("Segoe UI", 10F, FontStyle.Regular);
         lblStatus.ForeColor = Color.FromArgb(235, 235, 240);
         lblStatus.Location = new Point(14, 34);
-        lblStatus.MaximumSize = new Size(490, 52);
+        lblStatus.MaximumSize = new Size(490, 122);
         lblStatus.Name = "lblStatus";
-        lblStatus.Size = new Size(490, 52);
+        lblStatus.Size = new Size(490, 122);
         lblStatus.Text = "Hazır";
         //
         // _notifyIcon
@@ -352,11 +371,13 @@ partial class MainForm
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
         BackColor = Color.FromArgb(28, 30, 38);
-        ClientSize = new Size(574, 556);
+        ClientSize = new Size(574, 680);
         Controls.Add(pnlStatus);
+        Controls.Add(btnDiagnostic);
         Controls.Add(btnTest);
         Controls.Add(btnStop);
         Controls.Add(btnStart);
+        Controls.Add(chkContinuous);
         Controls.Add(chkBringFront);
         Controls.Add(nudDelay);
         Controls.Add(lblDelay);
@@ -367,7 +388,7 @@ partial class MainForm
         Controls.Add(lblSequence);
         Controls.Add(txtIntermediate);
         Controls.Add(lblIntermediate);
-        Controls.Add(txtTrigger);
+        Controls.Add(cmbTrigger);
         Controls.Add(lblTrigger);
         Controls.Add(btnRefresh);
         Controls.Add(cmbBrowser);
@@ -379,7 +400,7 @@ partial class MainForm
         MaximizeBox = false;
         Name = "MainForm";
         StartPosition = FormStartPosition.CenterScreen;
-        Text = "Browser Key Macro  v1.17.0";
+        Text = "Browser Key Macro";
         FormClosing += MainForm_FormClosing;
         Load += MainForm_Load;
         Resize += MainForm_Resize;
@@ -399,20 +420,22 @@ partial class MainForm
     private ComboBox cmbBrowser;
     private Button btnRefresh;
     private Label lblTrigger;
-    private TextBox txtTrigger;
+    private ComboBox cmbTrigger;
     private Label lblIntermediate;
-    private TextBox txtIntermediate;
+    private Controls.KeyCaptureTextBox txtIntermediate;
     private Label lblSequence;
-    private TextBox txtKey1;
-    private TextBox txtKey2;
-    private TextBox txtKey3;
-    private TextBox txtKey4;
+    private Controls.KeyCaptureTextBox txtKey1;
+    private Controls.KeyCaptureTextBox txtKey2;
+    private Controls.KeyCaptureTextBox txtKey3;
+    private Controls.KeyCaptureTextBox txtKey4;
     private Label lblDelay;
     private NumericUpDown nudDelay;
     private CheckBox chkBringFront;
+    private CheckBox chkContinuous;
     private Button btnStart;
     private Button btnStop;
     private Button btnTest;
+    private Button btnDiagnostic;
     private Panel pnlStatus;
     private Label lblStatusTitle;
     private Label lblStatus;

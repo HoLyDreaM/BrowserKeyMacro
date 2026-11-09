@@ -1,5 +1,119 @@
 # Değişiklik Günlüğü
 
+## 1.38.0
+
+- Varsayılan gecikme **500 ms** (önce 300).
+- **Sürekli döngü** kutusu: işaretliyken Başlat sonrası sıra Durdur'a kadar tekrarlanır; işaretsizken yalnız tetik tuşuyla bir kez çalışır.
+- Ayar `ContinuousLoop` `settings.ini` içinde saklanır.
+
+## 1.37.0
+
+- Tetikleyici tuş artık **açılır listeden** seçilir; harf ve rakamlar listede yok (oyun içinde algılanmıyordu).
+- Liste: F1–F12, Esc, Tab, Boşluk, Enter, Ctrl, Shift, Alt, ok tuşları, Insert, Delete, Home, End, Page Up, Page Down, Pause.
+- INI'de eski harf/rakam tetik (ör. `Trigger=F`) varsa açılışta F1 seçilir ve logda belirtilir.
+- Tanı testi artık 1. tuş kutusunu kullanır (tetik kutusu kalktı).
+
+## 1.36.0
+
+- Oyun içi tetik: harf/rakam tetik tuşları (F, G, 1 …) artık "enjekte edilmiş" (`LLKHF_INJECTED`) olarak gelse de tetikler. Klavye yazılımı, düzen aracı veya oyun istemcisi harfleri yeniden gönderdiğinde Windows onları bu bayrakla işaretliyor; önceki sürüm bunları tamamen yok sayıyordu (Esc/Ctrl/Shift/F1 bu yüzden çalışıp harfler çalışmıyordu).
+- Yalnız uygulamanın kendi `SendInput` tuşları (`dwExtraInfo = BKM`) yok sayılır; gönderim sırasında tetik zaten bastırılır.
+- Log: `KEY vk=… scan=… injected=0/1 trigger=…`.
+
+## 1.35.0
+
+- Başlıkta sürüm ve çalışan EXE yolu: `Browser Key Macro v1.35 | EXE: …`. Eski bir EXE'nin (ör. `publish\win-x64-v1.18.0\`) açılıp açılmadığı buradan anlaşılır.
+- Atama kutusuna yazmanın tek yolu `KeyCaptureTextBox.SetCapturedKey(Keys key, string source)`. Bu yöntem dışında yapılan `Text` atamaları engellenir ve `SET KEY BLOCKED` olarak loglanır.
+- `macro-debug.log`: her basış için `KEYDOWN | Field | KeyCode | KeyValue`, her yazma için `SET KEY | Field | Key | Value | Source` ve `STACK TRACE`. Yakalama bittikten sonra basılan tuşlar `SET KEY IGNORED` olarak loglanır.
+- Başlat düğmesindeki ikinci yazma yolu (`txtTrigger.StorageId = …`) kaldırıldı. INI'deki tuş değerleri yalnız atama tamamlandığında güncellenir.
+- Kullanılmayan Raw Input / poll kalıntıları (`WndProc`, `ProcessMessage`, `PollOnce`) silindi.
+- Yeni **Tuş Yakalama Tanı Testi** düğmesi: tetik kutusunu yakalamaya alır ve `KeyCode=F | KeyValue=70` gösterir.
+- Durum kartı gönderilen tuşları satır satır gösterir: `Gönderildi: Z`, `Gönderildi: 1`, … `Makro tamamlandı`.
+
+## 1.34.0
+
+- `KeyCaptureTextBox`: atama tamamen izole; yalnız ilk `OnKeyDown` → `e.KeyCode`.
+- Atama sırasında LL-hook **unregister**; poll timer kaldırıldı. Hook TextBox/INI yazamaz.
+- Tek basış → tek tuş; tekrarlayan KeyDown yok sayılır.
+
+## 1.33.0
+
+- Tuş atama: yalnız `KeyDown` → `e.KeyCode` (Keys enum). Layout/ToUnicode/scan yok.
+- INI sabit id (`F`, `D1`, `NumPad1`); ekranda okunabilir ad (`1`, `Num 1`, `Boşluk`).
+- Atama alanı odaktayken global tetik kapalı; tek başına Ctrl/Alt/Shift/Win atanamaz.
+
+## 1.32.0
+
+- Durum çubuğu yine tüm basılan tuşları yazar.
+- Harf/rakam tetik: ön plan klavye düzeninde `VkKeyScanEx` → fiziksel **scan** ile eşleşir (F klavyede F çalışır).
+
+## 1.31.0
+
+- Sabit F-klavye tablosu kaldırıldı. Harf, Windows aktif düzeninden `ToUnicodeEx` ile okunur.
+- Durum çubuğunda yalnız tetik tuşu (`Basılan: F ✓`) — G/Ğ/0 spam yok.
+
+## 1.30.0
+
+- Tuş algılama Raw Input / sanal tuş değil: düşük seviye klavye kancası + fiziksel scan.
+- Harf adı **F klavye** diziliminden okunur. F tuşu (Q konumundaki tuş) artık F yazar ve tetikler.
+
+## 1.29.0
+
+- Durum çubuğu yine basılan tuşu yazar (`Basılan: F`).
+- Harf/rakam: Raw VKey esas (scan ile ezilmez) + atanan tuşun scan kodu. Poll UI thread’de (arka plan thread harfi görmüyordu).
+
+## 1.28.0
+
+- **Sadeleştirme:** “Basılan: …” tuş spam’i kaldırıldı — durum yalnız tetik/gönderim.
+- Tetik: yalnız atanan VK, rising-edge poll (+ Raw yardımcı). Prime/FG-gate karmaşası yok.
+
+## 1.27.0
+
+- Başlat sonrası yanlış ateş: tetik tuşu bırakılmadan armed olmaz (prime).
+- Tetik yalnız seçilen oyun/tarayıcı ön plandayken (FG gate).
+- Rising-edge poll; durum çubuğu eski BeginInvoke mesajlarını atlar.
+
+## 1.26.0
+
+- Harf/sayı tetik: Raw Input `VKey` yerine **MakeCode → MapVirtualKey** (F basınca L görünmesi giderildi).
+
+## 1.25.0
+
+- Durum: makro gönderirken tuş spam’i yok.
+- Tetik atama: **Tab / Ctrl / Shift / Alt** (PreviewKeyDown).
+- Edge arkaya düşme: Alt/`SwitchToThisWindow` kaldırıldı; öne alma yalnız **seçilen HWND**.
+
+## 1.24.0
+
+- Durum çubuğu: basılan her tuş `Basılan: X` (tetikse `✓ tetik tuşu`) — hangi tuşa bastığın görünür.
+
+## 1.22.0
+
+- **H1:** Hedef process zaten ön plandaysa `TryBringToFront` çağrılmaz; servis içinde de Alt/ForceForeground no-op (oyunda gereksiz Alt enjeksiyonu yok).
+- **H2:** Debounce armed CAS'ten önce — debounce skip armed yakmaz; 2./3. tetik yeniden ateşlenebilir.
+- **H3/H4:** `SendInput`/`ForceKeyUp` `dwExtraInfo` işareti; Raw Input kendi KEYUP yankısını yok sayar. Suppress sırasında poll sahte UP ile re-arm yok; fiziksel Raw UP + suppress-off reconcile korunur. `ForceKeyUp` yalnız tetik hâlâ down iken.
+- **H5:** `canContinue` process eşleşmesi; transient miss’te 1 kısa retry; abort yalnız process değişimi / pencere kapalı.
+- Caps Lock: tetik/gönderim sabit VK yolu (`ToUnicode`/char yok) — açık/kapalı aynı davranış.
+- Test butonu ve hotkey aynı `SendInput` yolu (değişmedi, doğrulandı).
+
+## 1.21.0
+
+- **Tetik:** karma LL/raw/poll kenar kilitleri kaldırıldı. Birincil yol `GetAsyncKeyState` poll + **armed** (tuş bırakılınca yeniden kurulur) — 20–30 basışta algılamama giderildi.
+- Raw Input yardımcı; LL-hook yok.
+- **Gönderim:** process eşleşmesi geri (HWND titremesi yarım sırayı kesmesin); VK+scan birincil (1.18 yolu); seçilen HWND yine öne alınır.
+
+## 1.20.0
+
+- **Oyuna tuş gitmiyor:** eşleşme process adından **HWND**’ye alındı (aynı Edge’de Bitget açıkken oyuna gitmeme).
+- SendInput birincil yol **scan-code** (WebGL); VK yedek.
+- Tetik basılıysa gönderim öncesi `ForceKeyUp` (F basılıyken Z/1/3 yutulmasın).
+- Tetik algı: Raw Input + **LL-hook** + poll-assist (2ms); debounce 150ms.
+
+## 1.19.0
+
+- **Kritik:** `SuppressInput` sırasında tetik KEYUP yutuluyordu → `_rawDown=1` kilitleniyordu; bir kez çalıştıktan sonra tekrar F basılmıyordu. KEYUP artık suppress’te de işlenir; suppress kapanınca `ResetTriggerEdge`.
+- Raw Input yanında sürekli **poll-assist** (5ms) — kaçan ilk basışlar için yedek kenar; debounce 180ms tekilleştirir.
+- Debounce 400ms → 180ms (çoklu basışta “algılamıyor” hissi azalır).
+
 ## 1.18.0
 
 - Durum kartı spam'i kaldırıldı: yanlış tuşlar artık "Algılanan: Q / W / …" diye sayılmaz (yalnız `macro-debug.log`).

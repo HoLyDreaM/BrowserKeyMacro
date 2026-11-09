@@ -3,66 +3,105 @@ using System.Runtime.InteropServices;
 namespace BrowserKeyMacro.Services;
 
 /// <summary>
-/// Birincil tetikleyici: RegisterRawInputDevices (keyboard, RIDEV_INPUTSINK) → WM_INPUT → edge → UI BeginInvoke.
-/// Yedek: yalnız kayıt başarısız veya WM_INPUT gelmezse GetAsyncKeyState poll.
+/// Tetik: WH_KEYBOARD_LL + sabit VK (Keys).
+/// Tuş atama sırasında tamamen unregister; callback'ler no-op.
 /// </summary>
 public sealed class GlobalHotkeyService : IDisposable
 {
-    private const int WmInput = 0x00FF;
-    private const int RidInput = 0x10000003;
-    private const int RimTypeKeyboard = 1;
-    private const int RidevInputSink = 0x00000100;
-    private const int RidevRemove = 0x00000001;
-    private const ushort RiKeyBreak = 0x0001;
-    private const int DebounceMs = 400;
-    private const int FallbackWatchMs = 800;
+    private const int WhKeyboardLl = 13;
+    private const int LlkhfUp = 0x80;
+    private const int LlkhfInjected = 0x10;
+    private const int DebounceMs = 200;
 
-    private IntPtr _hwndTarget;
+    private readonly LowLevelProc _proc;
+    private IntPtr _hook = IntPtr.Zero;
     private Control? _ui;
     private Action? _onTrigger;
-    private Thread? _pollThread;
-    private Thread? _watchThread;
-    private volatile bool _stop;
+    private Action<string, bool>? _onKeySeen;
     private volatile bool _registered;
-    private volatile bool _rawInputOk;
-    private volatile bool _usePollFallback;
-    private volatile bool _wmInputSeen;
+    private volatile bool _isCapturing;
     private volatile ushort _vk;
     private string _keyName = string.Empty;
+    private string _pausedKeyName = string.Empty;
     private int _lastWin32Error;
-    private int _rawDown;
-    private int _pollDown;
+    private int _wasDown;
+    private int _downVk;
     private long _lastFireTick;
-    private int _spyBudget;
     private volatile bool _suppressInput;
     private bool _disposed;
+
+    public GlobalHotkeyService() => _proc = HookCallback;
 
     public bool IsRegistered => _registered;
     public string CurrentKeyName => _keyName;
     public ushort CurrentVk => _vk;
     public int LastWin32Error => _lastWin32Error;
-    public bool IsRawInputActive => _rawInputOk && !_usePollFallback;
-    public bool IsPollFallbackActive => _usePollFallback;
-
+    public bool IsCapturing => _isCapturing;
     /// <summary>
-    /// SendInput sırasında Raw Input / poll tetik ve spy kapalı — kendi gönderdiğimiz tuşlar
-    /// "yanlış tuş" diye durum kartını doldurmasın, F yeniden ateşlenmesin.
+    /// Tuş atama başladı: hook tamamen kapatılır, hiçbir callback TextBox/INI değiştirmez.
     /// </summary>
-    public void SuppressInput(bool suppress) => _suppressInput = suppress;
-
-    /// <summary>
-    /// Ana form HWND — Raw Input hwndTarget. HandleCreated sonrası çağrılmalı.
-    /// </summary>
-    public void SetNotifyWindow(IntPtr hwnd)
+    public void BeginCaptureSuspend()
     {
-        _hwndTarget = hwnd;
-        MacroDebugLog.Write($"SetNotifyWindow HWND=0x{hwnd.ToInt64():X}");
+        _isCapturing = true;
+        if (_registered)
+        {
+            _pausedKeyName = _keyName;
+            UnregisterHookOnly();
+            MacroDebugLog.Write("CaptureSuspend: hook kaldırıldı");
+        }
+        else
+        {
+            MacroDebugLog.Write("CaptureSuspend: zaten kayıtsız");
+        }
     }
 
-    public void SetUiNotify(Control ui, Action onTrigger)
+    /// <summary>Atama bitti: makro çalışıyorsa tetik yeniden kaydedilir.</summary>
+    public void EndCaptureSuspend(bool restoreIfHadKey)
+    {
+        _isCapturing = false;
+        if (!restoreIfHadKey || string.IsNullOrEmpty(_pausedKeyName))
+        {
+            _pausedKeyName = string.Empty;
+            MacroDebugLog.Write("CaptureResume: restore yok");
+            return;
+        }
+
+        var key = _pausedKeyName;
+        _pausedKeyName = string.Empty;
+        if (TryRegister(key, out var err))
+            MacroDebugLog.Write($"CaptureResume: yeniden kayıt OK ({key})");
+        else
+            MacroDebugLog.Write($"CaptureResume: kayıt FAIL ({key}) Win32={err}");
+    }
+
+    public void SuppressInput(bool suppress)
+    {
+        _suppressInput = suppress;
+        if (!suppress)
+        {
+            Interlocked.Exchange(ref _wasDown, 0);
+            Interlocked.Exchange(ref _downVk, 0);
+            Interlocked.Exchange(ref _lastFireTick, 0);
+        }
+
+        MacroDebugLog.Write($"SuppressInput={suppress}");
+    }
+
+    public void ResetTriggerEdge(string reason)
+    {
+        Interlocked.Exchange(ref _wasDown, 0);
+        Interlocked.Exchange(ref _lastFireTick, 0);
+        MacroDebugLog.Write($"ResetTriggerEdge ({reason})");
+    }
+
+    public void SetNotifyWindow(IntPtr hwnd) =>
+        MacroDebugLog.Write($"SetNotifyWindow HWND=0x{hwnd.ToInt64():X}");
+
+    public void SetUiNotify(Control ui, Action onTrigger, Action<string, bool>? onKeySeen = null)
     {
         _ui = ui;
         _onTrigger = onTrigger;
+        _onKeySeen = onKeySeen;
     }
 
     public bool TryRegister(string keyName, out int win32Error)
@@ -71,7 +110,14 @@ public sealed class GlobalHotkeyService : IDisposable
         _lastWin32Error = 0;
         Unregister();
 
-        if (!KeyboardInputService.TryMapVirtualKey(keyName, out var vk))
+        if (_isCapturing)
+        {
+            _pausedKeyName = KeyBindingMapper.NormalizeStorageId(keyName) ?? keyName;
+            MacroDebugLog.Write($"Register ertelendi (capturing) → {_pausedKeyName}");
+            return true;
+        }
+
+        if (!KeyBindingMapper.TryGetVirtualKey(keyName, out var vk))
         {
             win32Error = 87;
             _lastWin32Error = win32Error;
@@ -83,153 +129,60 @@ public sealed class GlobalHotkeyService : IDisposable
         {
             win32Error = 1400;
             _lastWin32Error = win32Error;
-            MacroDebugLog.Write("Register fail: UI notify yok");
             return false;
         }
 
-        if (_hwndTarget == IntPtr.Zero)
-        {
-            if (_ui.IsHandleCreated)
-                _hwndTarget = _ui.Handle;
-            if (_hwndTarget == IntPtr.Zero)
-            {
-                win32Error = 1400;
-                _lastWin32Error = win32Error;
-                MacroDebugLog.Write("Register fail: notify HWND yok");
-                return false;
-            }
-        }
-
         _vk = vk;
-        _keyName = keyName;
-        _stop = false;
-        _spyBudget = 12; // yalnız dosya logu; UI'ye gitmez
+        _keyName = KeyBindingMapper.NormalizeStorageId(keyName) ?? keyName;
         _suppressInput = false;
-        _wmInputSeen = false;
-        _usePollFallback = false;
-        _rawInputOk = false;
-        Interlocked.Exchange(ref _rawDown, 0);
-        Interlocked.Exchange(ref _pollDown, 0);
+        Interlocked.Exchange(ref _wasDown, 0);
+        Interlocked.Exchange(ref _downVk, 0);
         Interlocked.Exchange(ref _lastFireTick, 0);
 
-        if (!TryRegisterRawInput(out win32Error))
+        _hook = SetWindowsHookEx(WhKeyboardLl, _proc, GetModuleHandle(null), 0);
+        if (_hook == IntPtr.Zero)
         {
-            MacroDebugLog.Write($"Raw Input register FAIL Win32={win32Error} → Fallback poll armed");
-            _rawInputOk = false;
-            _usePollFallback = true;
-            StartPollThread();
-            _registered = true;
-            MacroDebugLog.Write(
-                $"Register success (poll-fallback) VK=0x{vk:X2} ({keyName}) HWND=0x{_hwndTarget.ToInt64():X}");
-            return true;
+            win32Error = Marshal.GetLastWin32Error();
+            _lastWin32Error = win32Error;
+            MacroDebugLog.Write($"LL hook FAIL Win32={win32Error}");
+            _vk = 0;
+            _keyName = string.Empty;
+            return false;
         }
 
-        _rawInputOk = true;
-        MacroDebugLog.Write(
-            $"Raw Input register OK VK=0x{vk:X2} ({keyName}) HWND=0x{_hwndTarget.ToInt64():X} RIDEV_INPUTSINK");
-        StartWatchdogThread();
         _registered = true;
-        MacroDebugLog.Write(
-            $"Register success (rawinput-primary) VK=0x{vk:X2} ({keyName}) path=rawinput");
+        MacroDebugLog.Write($"Register LL want={_keyName} vk=0x{vk:X2}");
         return true;
     }
 
     public void Unregister()
     {
-        var was = _registered || _vk != 0;
-        var prevVk = _vk;
+        var was = _registered || _hook != IntPtr.Zero;
         var prevName = _keyName;
-        var prevPath = _usePollFallback ? "poll-fallback" : (_rawInputOk ? "rawinput" : "none");
-
-        _registered = false;
-        _stop = true;
-
-        if (_pollThread is not null)
-        {
-            if (!_pollThread.Join(1000))
-                MacroDebugLog.Write("Poll thread Join timeout");
-            _pollThread = null;
-        }
-
-        if (_watchThread is not null)
-        {
-            if (!_watchThread.Join(1000))
-                MacroDebugLog.Write("Watch thread Join timeout");
-            _watchThread = null;
-        }
-
-        if (_rawInputOk && _hwndTarget != IntPtr.Zero)
-            UnregisterRawInput();
-
-        _rawInputOk = false;
-        _usePollFallback = false;
-        _wmInputSeen = false;
+        UnregisterHookOnly();
         _vk = 0;
         _keyName = string.Empty;
+        _pausedKeyName = string.Empty;
+        Interlocked.Exchange(ref _wasDown, 0);
+        Interlocked.Exchange(ref _downVk, 0);
         if (was)
-            MacroDebugLog.Write($"Unregister VK=0x{prevVk:X2} ({prevName}) path={prevPath}");
+            MacroDebugLog.Write($"Unregister ({prevName})");
     }
 
-    /// <summary>WM_INPUT bu servise ait mi (ana form WndProc kontrolü).</summary>
-    public bool IsOurHotkeyMessage(in Message m) =>
-        m.Msg == WmInput && _registered && _rawInputOk;
-
-    /// <summary>
-    /// Ana form WndProc içinden çağrılır. WM_INPUT işler; true = bu mesaj Raw Input idi.
-    /// </summary>
-    public bool ProcessMessage(ref Message m)
+    private void UnregisterHookOnly()
     {
-        if (m.Msg != WmInput || !_registered || !_rawInputOk)
-            return false;
-
-        try
+        _registered = false;
+        if (_hook != IntPtr.Zero)
         {
-            if (!TryReadRawKeyboard(m.LParam, out var vKey, out var keyUp, out var makeCode))
-                return true;
-
-            _wmInputSeen = true;
-            if (_suppressInput)
-                return true;
-
-            var vk = (ushort)vKey;
-
-            // Dosya logu (kısa bütçe) — UI'ye yanlış tuş spam'i YOK
-            if (!keyUp && vk != _vk && _spyBudget > 0 && _vk != 0)
-            {
-                _spyBudget--;
-                var name = VkDisplayName(vk);
-                MacroDebugLog.Write(
-                    $"KEY spy (rawinput) VK=0x{vk:X2} ({name}) make=0x{makeCode:X} (want 0x{_vk:X2} {_keyName})");
-            }
-
-            if (vk == _vk && _vk != 0)
-            {
-                if (keyUp)
-                {
-                    Interlocked.Exchange(ref _rawDown, 0);
-                }
-                else if (!_usePollFallback && Interlocked.CompareExchange(ref _rawDown, 1, 0) == 0)
-                {
-                    Fire("rawinput");
-                }
-            }
+            UnhookWindowsHookEx(_hook);
+            _hook = IntPtr.Zero;
         }
-        catch (Exception ex)
-        {
-            MacroDebugLog.Write($"ProcessMessage WM_INPUT hata: {ex.Message}");
-        }
-
-        return true;
     }
 
     public void LogDiagnostic(string reason, WindowSnapshot? foreground)
     {
-        var path = !_registered ? "none"
-            : _usePollFallback ? "poll-fallback"
-            : _rawInputOk ? "rawinput"
-            : "none";
         MacroDebugLog.Write(
-            $"{reason} | registered={_registered} path={path} key={_keyName} VK=0x{_vk:X2} wmInputSeen={_wmInputSeen} | " +
+            $"{reason} | registered={_registered} capturing={_isCapturing} key={_keyName} vk=0x{_vk:X2} | " +
             $"aktif Process={foreground?.ProcessName ?? "-"} Title=\"{foreground?.Title ?? "-"}\"");
     }
 
@@ -241,155 +194,76 @@ public sealed class GlobalHotkeyService : IDisposable
         _disposed = true;
     }
 
-    private bool TryRegisterRawInput(out int win32Error)
+    private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        win32Error = 0;
-        var devices = new[]
-        {
-            new RAWINPUTDEVICE
-            {
-                usUsagePage = 0x01,
-                usUsage = 0x06,
-                dwFlags = RidevInputSink,
-                hwndTarget = _hwndTarget
-            }
-        };
-
-        if (RegisterRawInputDevices(devices, (uint)devices.Length, (uint)Marshal.SizeOf<RAWINPUTDEVICE>()))
-            return true;
-
-        win32Error = Marshal.GetLastWin32Error();
-        _lastWin32Error = win32Error;
-        return false;
-    }
-
-    private void UnregisterRawInput()
-    {
-        try
-        {
-            var devices = new[]
-            {
-                new RAWINPUTDEVICE
-                {
-                    usUsagePage = 0x01,
-                    usUsage = 0x06,
-                    dwFlags = RidevRemove,
-                    hwndTarget = IntPtr.Zero
-                }
-            };
-            RegisterRawInputDevices(devices, (uint)devices.Length, (uint)Marshal.SizeOf<RAWINPUTDEVICE>());
-            MacroDebugLog.Write("Raw Input unregister (RIDEV_REMOVE)");
-        }
-        catch (Exception ex)
-        {
-            MacroDebugLog.Write($"Raw Input unregister hata: {ex.Message}");
-        }
-    }
-
-    private void StartPollThread()
-    {
-        _pollThread = new Thread(PollLoop)
-        {
-            IsBackground = true,
-            Name = "BKM-PollFallback",
-            Priority = ThreadPriority.AboveNormal
-        };
-        _pollThread.Start();
-    }
-
-    private void StartWatchdogThread()
-    {
-        _watchThread = new Thread(WatchdogLoop)
-        {
-            IsBackground = true,
-            Name = "BKM-RawWatch",
-            Priority = ThreadPriority.BelowNormal
-        };
-        _watchThread.Start();
-    }
-
-    /// <summary>
-    /// Raw Input kayıtlı ama WM_INPUT hiç gelmezken tetikleyici basılırsa poll yedeğini silahlandır.
-    /// Kısa yarış için: tuş aktivitesinden sonra bir dönem daha bekler; hâlâ WM_INPUT yoksa silahlanır.
-    /// </summary>
-    private void WatchdogLoop()
-    {
-        MacroDebugLog.Write("Raw Input watchdog start");
-        var pendingProve = false;
-        while (!_stop && _registered && !_usePollFallback)
+        // Atama / kayıt yokken hiçbir iş yapma
+        if (nCode >= 0 && !_isCapturing && _registered && _hook != IntPtr.Zero && lParam != IntPtr.Zero)
         {
             try
             {
-                if (_wmInputSeen)
+                var data = Marshal.PtrToStructure<KbdLlHook>(lParam);
+                // Klavye yazılımı / düzen aracı / oyun istemcisi harfleri yeniden enjekte edebiliyor;
+                // yalnız kendi SendInput işaretimizi (dwExtraInfo) yok say.
+                var ours = (uint)data.dwExtraInfo == KeyboardInputService.InjectedExtraInfoValue;
+                if (!ours)
                 {
-                    MacroDebugLog.Write("Raw Input watchdog: WM_INPUT görüldü, poll gerekmez");
-                    break;
-                }
-
-                if (_vk != 0)
-                {
-                    var down = (GetAsyncKeyState(_vk) & 0x8000) != 0;
-                    if (down && !pendingProve)
-                    {
-                        pendingProve = true;
-                        MacroDebugLog.Write(
-                            "Raw Input watchdog: tetikleyici basıldı, WM_INPUT doğrulaması bekleniyor…");
-                    }
-                    else if (pendingProve && !_wmInputSeen)
-                    {
-                        MacroDebugLog.Write(
-                            "Fallback poll armed (no WM_INPUT after proven key activity) → path=poll-fallback");
-                        _usePollFallback = true;
-                        StartPollThread();
-                        Interlocked.Exchange(ref _pollDown, 0);
-                        break;
-                    }
+                    var keyUp = (data.flags & LlkhfUp) != 0;
+                    var injected = (data.flags & LlkhfInjected) != 0;
+                    HandleKey(NormalizeModifier((ushort)data.vkCode), keyUp, injected, data.scanCode);
                 }
             }
             catch (Exception ex)
             {
-                MacroDebugLog.Write($"Watchdog hata: {ex.Message}");
+                MacroDebugLog.Write($"LL hook hata: {ex.Message}");
             }
-
-            Thread.Sleep(FallbackWatchMs);
         }
 
-        MacroDebugLog.Write("Raw Input watchdog exit");
+        return CallNextHookEx(_hook, nCode, wParam, lParam);
     }
 
-    private void PollLoop()
+    private void HandleKey(ushort vk, bool keyUp, bool injected, uint scanCode)
     {
-        MacroDebugLog.Write("PollLoop start 5ms (fallback)");
-        while (!_stop)
+        if (_isCapturing || !_registered)
+            return;
+
+        var name = KeyBindingMapper.DisplayFromVirtualKey(vk);
+        var isTrigger = _vk != 0 && vk == _vk;
+
+        if (keyUp)
         {
-            try
-            {
-                if (_registered && _usePollFallback && _vk != 0 && !_suppressInput)
-                {
-                    var down = (GetAsyncKeyState(_vk) & 0x8000) != 0;
-                    if (!down)
-                    {
-                        Interlocked.Exchange(ref _pollDown, 0);
-                    }
-                    else if (Interlocked.CompareExchange(ref _pollDown, 1, 0) == 0)
-                    {
-                        Fire("poll-fallback");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                MacroDebugLog.Write($"PollLoop hata: {ex.Message}");
-            }
-
-            Thread.Sleep(5);
+            Interlocked.CompareExchange(ref _downVk, 0, vk);
+            if (isTrigger)
+                Interlocked.Exchange(ref _wasDown, 0);
+            return;
         }
 
-        MacroDebugLog.Write("PollLoop exit");
+        if (_suppressInput)
+        {
+            if (isTrigger)
+                Interlocked.Exchange(ref _wasDown, 1);
+            return;
+        }
+
+        var repeat = Interlocked.Exchange(ref _downVk, vk) == vk;
+        if (!repeat)
+        {
+            MacroDebugLog.Write(
+                $"KEY vk=0x{vk:X2} '{name}' scan=0x{scanCode:X2} injected={(injected ? 1 : 0)} trigger={isTrigger} want={_keyName}");
+            NotifyKeySeen(name, isTrigger);
+        }
+
+        if (isTrigger)
+            TryFireEdge("ll-hook");
     }
 
-    private void Fire(string source)
+    private void TryFireEdge(string source)
     {
+        if (!_registered || _suppressInput || _isCapturing)
+            return;
+
+        if (Interlocked.CompareExchange(ref _wasDown, 1, 0) != 0)
+            return;
+
         var now = Environment.TickCount64;
         var last = Interlocked.Read(ref _lastFireTick);
         if (last != 0 && now - last < DebounceMs)
@@ -399,34 +273,16 @@ public sealed class GlobalHotkeyService : IDisposable
         }
 
         Interlocked.Exchange(ref _lastFireTick, now);
-
-        var fg = GetForegroundWindow();
-        GetWindowThreadProcessId(fg, out var pid);
-        var proc = "?";
-        try
-        {
-            if (pid != 0)
-                proc = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName;
-        }
-        catch
-        {
-            // ignore
-        }
-
-        MacroDebugLog.Write(
-            $"Trigger FIRE ({source}) VK=0x{_vk:X2} ({_keyName}) fgProc={proc} → BeginInvoke");
+        MacroDebugLog.Write($"Trigger FIRE ({source}) {_keyName} vk=0x{_vk:X2}");
 
         var ui = _ui;
         var cb = _onTrigger;
-        if (ui is null || cb is null || ui.IsDisposed)
+        if (ui is null || cb is null || ui.IsDisposed || !ui.IsHandleCreated)
             return;
 
         try
         {
-            if (ui.IsHandleCreated)
-                ui.BeginInvoke(cb);
-            else
-                MacroDebugLog.Write("Trigger FIRE ama UI handle yok");
+            ui.BeginInvoke(cb);
         }
         catch (Exception ex)
         {
@@ -434,112 +290,55 @@ public sealed class GlobalHotkeyService : IDisposable
         }
     }
 
-    private static bool TryReadRawKeyboard(IntPtr hRawInput, out ushort vKey, out bool keyUp, out ushort makeCode)
+    private void NotifyKeySeen(string name, bool isTrigger)
     {
-        vKey = 0;
-        keyUp = false;
-        makeCode = 0;
+        if (_isCapturing)
+            return;
 
-        uint size = 0;
-        GetRawInputData(hRawInput, RidInput, IntPtr.Zero, ref size, (uint)Marshal.SizeOf<RAWINPUTHEADER>());
-        if (size == 0)
-            return false;
+        var ui = _ui;
+        var cb = _onKeySeen;
+        if (ui is null || cb is null || ui.IsDisposed || !ui.IsHandleCreated)
+            return;
 
-        var buffer = Marshal.AllocHGlobal((int)size);
         try
         {
-            var written = GetRawInputData(hRawInput, RidInput, buffer, ref size, (uint)Marshal.SizeOf<RAWINPUTHEADER>());
-            if (written == unchecked((uint)-1) || written == 0)
-                return false;
-
-            var header = Marshal.PtrToStructure<RAWINPUTHEADER>(buffer);
-            if (header.dwType != RimTypeKeyboard)
-                return false;
-
-            var kbPtr = IntPtr.Add(buffer, Marshal.SizeOf<RAWINPUTHEADER>());
-            var kb = Marshal.PtrToStructure<RAWKEYBOARD>(kbPtr);
-            vKey = kb.VKey;
-            makeCode = kb.MakeCode;
-            keyUp = (kb.Flags & RiKeyBreak) != 0;
-            return true;
+            ui.BeginInvoke(cb, name, isTrigger);
         }
-        finally
+        catch (Exception ex)
         {
-            Marshal.FreeHGlobal(buffer);
+            MacroDebugLog.Write($"KeySeen hata: {ex.Message}");
         }
     }
 
-    private static string VkDisplayName(ushort vk) => vk switch
+    private static ushort NormalizeModifier(ushort vk) => vk switch
     {
-        >= 0x30 and <= 0x39 => ((char)vk).ToString(),
-        >= 0x41 and <= 0x5A => ((char)vk).ToString(),
-        >= 0x70 and <= 0x7B => $"F{vk - 0x6F}",
-        0x20 => "Space",
-        0x0D => "Enter",
-        0x09 => "Tab",
-        0x1B => "Esc",
-        0x05 => "X1",
-        0x06 => "X2",
-        0x04 => "MButton",
-        0xBD => "-",
-        0xBB => "=",
-        0xDB => "[",
-        0xDD => "]",
-        0xBC => ",",
-        0xBE => ".",
-        0xC0 => "`",
-        _ => $"VK_0x{vk:X2}"
+        0xA0 or 0xA1 => 0x10,
+        0xA2 or 0xA3 => 0x11,
+        0xA4 or 0xA5 => 0x12,
+        _ => vk
     };
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RAWINPUTDEVICE
-    {
-        public ushort usUsagePage;
-        public ushort usUsage;
-        public int dwFlags;
-        public IntPtr hwndTarget;
-    }
+    private delegate IntPtr LowLevelProc(int nCode, IntPtr wParam, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct RAWINPUTHEADER
+    private struct KbdLlHook
     {
-        public int dwType;
-        public int dwSize;
-        public IntPtr hDevice;
-        public IntPtr wParam;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RAWKEYBOARD
-    {
-        public ushort MakeCode;
-        public ushort Flags;
-        public ushort Reserved;
-        public ushort VKey;
-        public uint Message;
-        public uint ExtraInformation;
+        public uint vkCode;
+        public uint scanCode;
+        public uint flags;
+        public uint time;
+        public UIntPtr dwExtraInfo;
     }
 
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool RegisterRawInputDevices(
-        [In] RAWINPUTDEVICE[] pRawInputDevices,
-        uint uiNumDevices,
-        uint cbSize);
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
 
     [DllImport("user32.dll")]
-    private static extern uint GetRawInputData(
-        IntPtr hRawInput,
-        uint uiCommand,
-        IntPtr pData,
-        ref uint pcbSize,
-        uint cbSizeHeader);
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
-    [DllImport("user32.dll")]
-    private static extern short GetAsyncKeyState(int vKey);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetForegroundWindow();
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr GetModuleHandle(string? lpModuleName);
 }
