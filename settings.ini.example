@@ -1,0 +1,13 @@
+[General]
+SelectedBrowserProcess=
+SelectedBrowserTitle=
+DelayMs=300
+BringBrowserToFront=true
+
+[Keys]
+Trigger=F
+IntermediateKey=
+Key1=1
+Key2=
+Key3=
+Key4=

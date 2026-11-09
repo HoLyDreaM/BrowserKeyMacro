@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <RootNamespace>BrowserKeyMacro</RootNamespace>
+    <AssemblyName>BrowserKeyMacro</AssemblyName>
+    <Product>Browser Key Macro</Product>
+    <Description>Seçilen tarayıcı penceresi öndeyken tetikleyici tuşla klavye makrosu gönderir.</Description>
+    <Version>1.17.0</Version>
+    <ApplicationIcon>Assets\BrowserKeyMacro.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Kaynakta Assets\ altında; çıktıda exe yanına icon.png (Assets\ klasörü yok) -->
+    <None Update="Assets\icon.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>icon.png</TargetPath>
+    </None>
+  </ItemGroup>
+
+</Project>
