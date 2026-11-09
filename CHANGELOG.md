@@ -1,5 +1,12 @@
 # Değişiklik Günlüğü
 
+## 1.18.0
+
+- Durum kartı spam'i kaldırıldı: yanlış tuşlar artık "Algılanan: Q / W / …" diye sayılmaz (yalnız `macro-debug.log`).
+- Makro gönderimi sırasında Raw Input / poll bastırılır (`SuppressInput`) — kendi gönderdiğimiz Z/1/3 tetik/spy karıştırmasın.
+- Durum metni gönderilen sırayı gösterir: `Gönderiliyor: Z → 1 → Z → 3…` / `Makro tamamlandı: …`.
+- Log kanıtı (önceki oturum): `F` ateşlenince `SendInput` Z,1,Z,3,Z,1,Z,3 tamamlanmıştı; kullanıcıda görünen "3 basılmadı" çoğunlukla UI spam + gönderim sırasında ekstra fiziksel tuşlardı.
+
 ## 1.17.0
 
 - Tetikleyici mimarisi: birincil yol **Raw Input** (`RegisterRawInputDevices` keyboard UsagePage=0x01 Usage=0x06 + `RIDEV_INPUTSINK`, `hwndTarget` = ana form) → `WM_INPUT` → edge-detect → `BeginInvoke` → `ExecuteTriggerSameAsButton` → `SendInput`.

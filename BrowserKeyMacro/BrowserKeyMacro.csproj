@@ -11,7 +11,7 @@
     <AssemblyName>BrowserKeyMacro</AssemblyName>
     <Product>Browser Key Macro</Product>
     <Description>Seçilen tarayıcı penceresi öndeyken tetikleyici tuşla klavye makrosu gönderir.</Description>
-    <Version>1.17.0</Version>
+    <Version>1.18.0</Version>
     <ApplicationIcon>Assets\BrowserKeyMacro.ico</ApplicationIcon>
   </PropertyGroup>
 

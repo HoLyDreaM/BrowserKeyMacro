@@ -113,7 +113,9 @@ Key4=4
 1. **Başlat** → `SetNotifyWindow(MainForm.Handle)` + `RegisterRawInputDevices` (UsagePage=0x01, Usage=0x06, `RIDEV_INPUTSINK`).
 2. Ana form `WndProc` → `ProcessMessage` → `WM_INPUT` edge-detect → `Trigger FIRE (rawinput)` → `BeginInvoke` → `ExecuteTriggerSameAsButton` → `SendInput`.
 3. Kayıt fail veya tuş basılmasına rağmen `WM_INPUT` yoksa → `Trigger FIRE (poll-fallback)`.
-4. `WH_KEYBOARD_LL` / `RegisterHotKey` birincil yol olarak kullanılmaz. Interception/kernel sürücü yok.
+4. Gönderim sırasında `SuppressInput(true)` — kendi `SendInput` tuşları tetik/spy karıştırmaz.
+5. Yanlış tuşlar durum kartına yazılmaz (yalnız `macro-debug.log`).
+6. `WH_KEYBOARD_LL` / `RegisterHotKey` birincil yol olarak kullanılmaz. Interception/kernel sürücü yok.
 
 Tuş gönderiminde Chrome/Edge/Firefox vb. için ayrı `if` / sabit process adı yoktur.
 
@@ -121,11 +123,14 @@ Tuş gönderiminde Chrome/Edge/Firefox vb. için ayrı `if` / sabit process adı
 
 - Her tetik / test: tek sıra; gönderim sırasında ikinci tetik kuyruğa alınır (bitince bir kez).
 - Boş tuş alanları atlanır.
+- Ara tuş doluysa sıra: Ara → Tuş1 → Ara → Tuş2 → … (ör. Z + 1 + 3 → `Z → 1 → Z → 3`).
 - SendKeys / PostMessage / WM_CHAR / DOM / JavaScript kullanılmaz.
 - `SendInput` başarısızsa Win32 kodu durum kartında gösterilir.
+- Durum kartı gönderilen sırayı gösterir (`Makro tamamlandı: Z → 1 → Z → 3…`).
 
 ## Sürüm
 
+- **1.18.0** — Yanlış-tuş UI spam kaldırıldı; gönderim sırasında SuppressInput; sıra durum kartında
 - **1.17.0** — Raw Input birincil tetikleyici; Assets runtime bağımlılığı kaldırıldı
 - **1.16.0** — Tetik kuyruğu / KEY spy durum kartı
 - **1.3.0** — Tarayıcı-agnostik gönderim yolu netleştirildi

@@ -20,7 +20,6 @@ public sealed class GlobalHotkeyService : IDisposable
     private IntPtr _hwndTarget;
     private Control? _ui;
     private Action? _onTrigger;
-    private Action<ushort, string>? _onSpyMismatch;
     private Thread? _pollThread;
     private Thread? _watchThread;
     private volatile bool _stop;
@@ -35,6 +34,7 @@ public sealed class GlobalHotkeyService : IDisposable
     private int _pollDown;
     private long _lastFireTick;
     private int _spyBudget;
+    private volatile bool _suppressInput;
     private bool _disposed;
 
     public bool IsRegistered => _registered;
@@ -45,6 +45,12 @@ public sealed class GlobalHotkeyService : IDisposable
     public bool IsPollFallbackActive => _usePollFallback;
 
     /// <summary>
+    /// SendInput sırasında Raw Input / poll tetik ve spy kapalı — kendi gönderdiğimiz tuşlar
+    /// "yanlış tuş" diye durum kartını doldurmasın, F yeniden ateşlenmesin.
+    /// </summary>
+    public void SuppressInput(bool suppress) => _suppressInput = suppress;
+
+    /// <summary>
     /// Ana form HWND — Raw Input hwndTarget. HandleCreated sonrası çağrılmalı.
     /// </summary>
     public void SetNotifyWindow(IntPtr hwnd)
@@ -53,11 +59,10 @@ public sealed class GlobalHotkeyService : IDisposable
         MacroDebugLog.Write($"SetNotifyWindow HWND=0x{hwnd.ToInt64():X}");
     }
 
-    public void SetUiNotify(Control ui, Action onTrigger, Action<ushort, string>? onSpyMismatch = null)
+    public void SetUiNotify(Control ui, Action onTrigger)
     {
         _ui = ui;
         _onTrigger = onTrigger;
-        _onSpyMismatch = onSpyMismatch;
     }
 
     public bool TryRegister(string keyName, out int win32Error)
@@ -98,7 +103,8 @@ public sealed class GlobalHotkeyService : IDisposable
         _vk = vk;
         _keyName = keyName;
         _stop = false;
-        _spyBudget = 80;
+        _spyBudget = 12; // yalnız dosya logu; UI'ye gitmez
+        _suppressInput = false;
         _wmInputSeen = false;
         _usePollFallback = false;
         _rawInputOk = false;
@@ -182,15 +188,18 @@ public sealed class GlobalHotkeyService : IDisposable
                 return true;
 
             _wmInputSeen = true;
+            if (_suppressInput)
+                return true;
+
             var vk = (ushort)vKey;
 
+            // Dosya logu (kısa bütçe) — UI'ye yanlış tuş spam'i YOK
             if (!keyUp && vk != _vk && _spyBudget > 0 && _vk != 0)
             {
                 _spyBudget--;
                 var name = VkDisplayName(vk);
                 MacroDebugLog.Write(
                     $"KEY spy (rawinput) VK=0x{vk:X2} ({name}) make=0x{makeCode:X} (want 0x{_vk:X2} {_keyName})");
-                NotifySpy(vk, name);
             }
 
             if (vk == _vk && _vk != 0)
@@ -355,7 +364,7 @@ public sealed class GlobalHotkeyService : IDisposable
         {
             try
             {
-                if (_registered && _usePollFallback && _vk != 0)
+                if (_registered && _usePollFallback && _vk != 0 && !_suppressInput)
                 {
                     var down = (GetAsyncKeyState(_vk) & 0x8000) != 0;
                     if (!down)
@@ -422,22 +431,6 @@ public sealed class GlobalHotkeyService : IDisposable
         catch (Exception ex)
         {
             MacroDebugLog.Write($"BeginInvoke hata: {ex.Message}");
-        }
-    }
-
-    private void NotifySpy(ushort vk, string name)
-    {
-        var ui = _ui;
-        var cb = _onSpyMismatch;
-        if (ui is null || cb is null || ui.IsDisposed || !ui.IsHandleCreated)
-            return;
-        try
-        {
-            ui.BeginInvoke(cb, vk, name);
-        }
-        catch
-        {
-            // ignore
         }
     }
 

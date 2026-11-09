@@ -26,7 +26,7 @@ public partial class MainForm : Form
         InitializeComponent();
         ApplyBrandingIcons();
         cmbBrowser.SelectedIndexChanged += CmbBrowser_SelectedIndexChanged;
-        _hotkeyService.SetUiNotify(this, OnGlobalTriggerFromBackground, OnKeySpyMismatch);
+        _hotkeyService.SetUiNotify(this, OnGlobalTriggerFromBackground);
     }
 
     private void ApplyBrandingIcons()
@@ -279,7 +279,7 @@ public partial class MainForm : Form
 
             SaveSettingsSafe();
             LogSelectedBrowser("Makro başlatıldı");
-            _hotkeyService.SetUiNotify(this, OnGlobalTriggerFromBackground, OnKeySpyMismatch);
+            _hotkeyService.SetUiNotify(this, OnGlobalTriggerFromBackground);
             _hotkeyService.SetNotifyWindow(Handle);
 
             if (!_hotkeyService.TryRegister(trigger, out var win32Error))
@@ -294,9 +294,9 @@ public partial class MainForm : Form
             UpdateRunningUi(true);
             _statusTimer.Start();
             Interlocked.Exchange(ref _pendingTrigger, 0);
-            SetStatus($"Tetikleyici aktif: {trigger} — oyundayken '{trigger}' bas (v1.17)");
+            SetStatus($"Tetikleyici aktif: {trigger} — oyundayken yalnızca '{trigger}' bas (v1.18)");
             UpdateTrayText($"Tetikleyici aktif: {trigger}");
-            MacroDebugLog.Write($"Hazır: oyundayken '{trigger}' bas. Yanlış tuşlar durum kartında görünür.");
+            MacroDebugLog.Write($"Hazır: oyundayken '{trigger}' bas. Durum kartında yanlış tuş spam'i yok.");
         }
         catch (Exception ex)
         {
@@ -335,6 +335,7 @@ public partial class MainForm : Form
 
         _isRunning = false;
         _isSending = false;
+        _hotkeyService.SuppressInput(false);
         Interlocked.Exchange(ref _sendingGate, 0);
         UpdateRunningUi(false);
         SetStatus(status);
@@ -372,14 +373,6 @@ public partial class MainForm : Form
         UpdateTrayText($"Global tetikleyici alındı: {key}");
         try { System.Media.SystemSounds.Beep.Play(); } catch { /* ignore */ }
         ExecuteTriggerSameAsButton("hotkey");
-    }
-
-    /// <summary>Oyunda tetikleyici dışında bir tuş basıldı — kullanıcıya göster.</summary>
-    private void OnKeySpyMismatch(ushort vk, string name)
-    {
-        if (!_isRunning || _isSending)
-            return;
-        SetStatus($"Algılanan: {name} — tetikleyici '{_activeTrigger}' değil (oyunda {_activeTrigger} bas)");
     }
 
     /// <summary>
@@ -424,9 +417,11 @@ public partial class MainForm : Form
         var selected = _selectedBrowser;
         var delay = (int)nudDelay.Value;
         _isSending = true;
-        MacroDebugLog.Write("Macro execution started");
-        if (isTest)
-            SetStatus("Test: hedef öne alınıyor…");
+        _hotkeyService.SuppressInput(true);
+        MacroDebugLog.Write($"Macro execution started seq=[{string.Join(',', sequence)}] delay={delay}ms");
+        SetStatus(isTest
+            ? $"Test gönderiliyor: {string.Join(" → ", sequence)}"
+            : $"Gönderiliyor: {string.Join(" → ", sequence)}");
 
         _ = Task.Run(() =>
         {
@@ -436,6 +431,7 @@ public partial class MainForm : Form
             }
             finally
             {
+                _hotkeyService.SuppressInput(false);
                 _isSending = false;
                 Interlocked.Exchange(ref _sendingGate, 0);
                 MacroDebugLog.Write("Macro execution completed");
@@ -574,23 +570,10 @@ public partial class MainForm : Form
                 return;
             }
 
-            if (isTest)
-            {
-                var summary = new StringBuilder();
-                summary.Append("Test tamamlandı");
-                summary.Append($" ({results.Count} tuş)");
-                if (results.Count > 0)
-                {
-                    summary.Append(" | ");
-                    summary.Append(string.Join(", ", results.Select(r => $"{r.KeyName} OK")));
-                }
-
-                UiSetStatus(summary.ToString());
-            }
-            else
-            {
-                UiSetStatus("Makro tamamlandı");
-            }
+            var sent = string.Join(" → ", results.Select(r => r.KeyName));
+            UiSetStatus(isTest
+                ? "Test tamamlandı: " + sent
+                : "Makro tamamlandı: " + sent);
         }
         catch (Exception ex)
         {
@@ -700,7 +683,7 @@ public partial class MainForm : Form
     {
         base.OnHandleCreated(e);
         _hotkeyService.SetNotifyWindow(Handle);
-        _hotkeyService.SetUiNotify(this, OnGlobalTriggerFromBackground, OnKeySpyMismatch);
+        _hotkeyService.SetUiNotify(this, OnGlobalTriggerFromBackground);
     }
 
     protected override void WndProc(ref Message m)
